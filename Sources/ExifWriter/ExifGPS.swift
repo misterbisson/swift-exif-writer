@@ -8,6 +8,7 @@ import Foundation
 public enum ImageContainer: Sendable, CaseIterable {
     case tiff
     case png
+    case heic
 
     /// From a file name's extension, or nil for one this library does not
     /// write.
@@ -15,6 +16,7 @@ public enum ImageContainer: Sendable, CaseIterable {
         switch pathExtension.lowercased() {
         case "tif", "tiff": self = .tiff
         case "png": self = .png
+        case "heic", "heif": self = .heic
         default: return nil
         }
     }
@@ -31,7 +33,7 @@ public enum ExifGPS {
             let handle = try FileHandle(forReadingFrom: url)
             defer { try? handle.close() }
             return try GPSBlock.position(in: FileStore(handle))
-        case .png:
+        case .png, .heic:
             return try position(in: Data(contentsOf: url), as: container)
         }
     }
@@ -45,9 +47,9 @@ public enum ExifGPS {
     /// leaves the picture and the rest of its metadata readable. A caller
     /// that needs all or nothing writes into a copy and moves it into place.
     ///
-    /// **A PNG is written whole to a new file beside it, which then takes
-    /// its place**, because what follows the EXIF has to move along. The
-    /// file is read into memory to do it.
+    /// **A PNG or a HEIC is written whole to a new file beside it, which
+    /// then takes its place**, because what follows the EXIF has to move
+    /// along. The file is read into memory to do it.
     @discardableResult
     public static func setPosition(_ position: GPSPosition?, inFileAt url: URL,
                                    as container: ImageContainer) throws -> Bool {
@@ -60,7 +62,7 @@ public enum ExifGPS {
             guard !edit.isEmpty else { return false }
             try edit.apply(to: handle)
             return true
-        case .png:
+        case .png, .heic:
             let before = try Data(contentsOf: url)
             let after = try settingPosition(position, in: before, as: container)
             guard after != before else { return false }
@@ -74,6 +76,7 @@ public enum ExifGPS {
         switch container {
         case .tiff: return try GPSBlock.position(in: ArrayStore(bytes: [UInt8](data)))
         case .png: return try PNGFile.position(in: [UInt8](data))
+        case .heic: return try HEICFile.position(in: [UInt8](data))
         }
     }
 
@@ -88,6 +91,8 @@ public enum ExifGPS {
             return Data(edit.applied(to: bytes))
         case .png:
             return try PNGFile.setting(position, in: bytes).map { Data($0) } ?? data
+        case .heic:
+            return try HEICFile.setting(position, in: bytes).map { Data($0) } ?? data
         }
     }
 

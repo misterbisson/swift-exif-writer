@@ -106,7 +106,10 @@ enum GPSBlock {
         }
 
         if place != nil {
-            if !entries.contains(where: { $0.tag == version }) {
+            // A new block says its version. One that was there without it,
+            // as ImageIO writes a block, is left without it, as ExifTool
+            // leaves it: only the position changes.
+            if old == nil {
                 insert(Entry(tag: version, type: 1, count: 4, value: [2, 3, 0, 0]), into: &entries)
             }
             insert(Entry(tag: latitudeRef, type: 2, count: 2, value: [0, 0, 0, 0]), into: &entries)
@@ -177,6 +180,15 @@ enum GPSBlock {
          0x00, 0x01,
          0x88, 0x25, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1A,
          0x00, 0x00, 0x00, 0x00]
+    }
+
+    /// **A structure that states nothing**: the seed, with a block that
+    /// holds only its version. For a container that cannot drop its EXIF
+    /// when the position was all the EXIF said.
+    static func empty() -> [UInt8] {
+        seed() + [0x00, 0x01,
+                  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x02, 0x03, 0x00, 0x00,
+                  0x00, 0x00, 0x00, 0x00]
     }
 
     /// Puts a value after the block's directory and points its entry at it.

@@ -16,6 +16,7 @@ try ExifGPS.position(inFileAt: url, as: .tiff)      // the position, or nil
 try ExifGPS.setPosition(nil, inFileAt: url, as: .tiff)   // take it out
 
 try ExifGPS.setPosition(bixby, inFileAt: other, as: .png)
+try ExifGPS.setPosition(bixby, inFileAt: phone, as: .heic)
 ```
 
 ## Why
@@ -37,7 +38,7 @@ Swift, checked against ExifTool.
 | --- | --- |
 | TIFF | Written and read |
 | PNG | Written and read |
-| HEIC | Planned |
+| HEIC | Written and read, where the file already has EXIF |
 
 The caller says which format a file is. Most cameras' raw files are TIFF
 structures too, and nothing in their first bytes tells them from a TIFF, so
@@ -51,8 +52,8 @@ faced and everything else in the GPS block are carried across as they were.
 
 ## How
 
-EXIF is a TIFF structure wherever it is kept: a TIFF file is one, and a PNG
-holds one in its `eXIf` chunk. Nothing that is already in that structure
+EXIF is a TIFF structure wherever it is kept: a TIFF file is one, a PNG
+holds one in its `eXIf` chunk, and a HEIC holds one as an item. Nothing that is already in that structure
 moves. It is full of offsets counted from its first byte, and some are in
 places a general reader cannot find, so it is never rebuilt:
 
@@ -79,6 +80,14 @@ given a position and then relieved of it, is byte for byte the file it
 started as. EXIF found after the picture's data is moved before it, where
 the format asks for it and where ExifTool puts it.
 
+**A HEIC is written whole to a new file too.** Its EXIF is an item in the
+file's data box, and another box holds every item's offset from the start
+of the file. So the EXIF is replaced where it lies, what follows it sits
+further along, the data box is given its new length, and every offset that
+pointed past the EXIF is moved by the difference. That is how ExifTool does
+it. Every other item is carried across as the bytes it was. An AVIF is laid
+out the same way and has not been tried.
+
 ## Limits
 
 - **It writes the EXIF, and not the XMP.** A file can state its position a
@@ -88,10 +97,14 @@ the format asks for it and where ExifTool puts it.
   ImageIO writes one into a PNG whenever it writes a position there, and
   reads it back when the EXIF has none.
 - **Set a PNG's position after ImageIO has copied the file, not before.**
-  `CGImageDestinationCopyImageSource` rewrites a PNG's EXIF, and on macOS
-  27.0.1 a position came out of that copy with its latitude and without
-  its longitude, whoever had written it. A TIFF comes through the same
-  copy with its position intact.
+  `CGImageDestinationCopyImageSource` rewrites a PNG's EXIF. On macOS
+  27.0.1, a copy made with metadata that said nothing of the position
+  brought one out with its latitude and without its longitude, whoever had
+  written it. A TIFF and a HEIC come through the same copy with their
+  position intact.
+- **A HEIC with no EXIF at all is refused.** Giving it some means adding an
+  item, which this does not do yet. Every HEIC a camera or ImageIO writes
+  has EXIF. A HEIC that holds a sequence of pictures is refused too.
 - **BigTIFF is refused**, and so is a file that would pass 4 GB.
 - **It is a writer, not a scrubber.** A block that was replaced and was not
   the last thing in the file stays in the bytes, unreferenced. Do not use
@@ -109,10 +122,18 @@ the format asks for it and where ExifTool puts it.
   they were. This reads what ExifTool wrote. ExifTool's validation finds
   nothing wrong with a file from here that it does not find wrong with one
   it wrote itself.
-- **Against ImageIO**, on macOS, on TIFFs and PNGs ImageIO wrote: 8 and 16
-  bits, compressed and not, a TIFF of more than one page, a PNG with no
-  metadata at all. It reads the position, the same decoded picture and the
-  same properties.
+- **Against ImageIO**, on macOS, on TIFFs, PNGs and HEICs ImageIO wrote: 8
+  and 16 bits, compressed and not, a TIFF of more than one page, a PNG with
+  no metadata at all. It reads the position, the same decoded picture and
+  the same properties.
+- **A HEIC's layouts**, on boxes built by hand: EXIF before the picture and
+  after it, the item list before the data and after it, each version of
+  the box that holds the offsets, offsets from a base, eight-byte offsets,
+  a 64-bit data box.
+
+**No HEIC straight from a phone has been tried yet.** The HEICs here were
+written by ImageIO: two small ones kept beside the tests, and a 24 megapixel
+one converted from a camera's JPEG.
 
 CI runs all of it on macOS and the first two on Linux, and fails if
 ExifTool is missing.

@@ -30,8 +30,18 @@ final class ImageIOTests: XCTestCase {
         /// 27.0.1, where ExifTool lists both. It does not do so in a TIFF.
         var statesItInXMPToo: Bool { container == .png && camera }
 
-        var type: String { container == .tiff ? "public.tiff" : "public.png" }
-        var fileExtension: String { container == .tiff ? "tif" : "png" }
+        /// One of the HEICs beside the tests, used as it is. A HEIC is not
+        /// made here, because a CI runner cannot be counted on to encode one.
+        var drawn: String?
+
+        var type: String {
+            switch container {
+            case .tiff: "public.tiff"
+            case .png: "public.png"
+            case .heic: "public.heic"
+            }
+        }
+        var fileExtension: String { container.fileExtension }
     }
 
     private let kinds = [
@@ -41,6 +51,8 @@ final class ImageIOTests: XCTestCase {
         Kind(name: "PNG", container: .png), Kind(name: "16-bit PNG", container: .png, bits: 16),
         Kind(name: "PNG with a camera's position", container: .png, camera: true),
         Kind(name: "PNG with no metadata", container: .png, bare: true),
+        Kind(name: "HEIC", container: .heic, drawn: "drawn"),
+        Kind(name: "HEIC with a camera's position", container: .heic, camera: true, drawn: "drawn-camera"),
     ]
 
     private func image(bits: Int, seed: Int) throws -> CGImage {
@@ -58,6 +70,11 @@ final class ImageIOTests: XCTestCase {
     }
 
     private func file(_ kind: Kind) throws -> Scratch {
+        if let drawn = kind.drawn {
+            let bytes = Sample.drawn(drawn)
+            XCTAssertFalse(bytes.isEmpty, "the fixture \(drawn).heic is missing")
+            return try Scratch(bytes, extension: kind.fileExtension)
+        }
         let scratch = try Scratch([], extension: kind.fileExtension)
         let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(
             scratch.url as CFURL, kind.type as CFString, kind.pages, nil))
@@ -198,11 +215,11 @@ final class ImageIOTests: XCTestCase {
         }
     }
 
-    /// **ImageIO can rewrite a TIFF afterwards and the position survives**:
-    /// an app that writes a rating into the file later, by copying it with
-    /// new metadata, does not lose the place.
-    func testThePositionSurvivesImageIOCopyingATIFF() throws {
-        for kind in kinds where kind.pages == 1 && kind.container == .tiff {
+    /// **ImageIO can rewrite a TIFF or a HEIC afterwards and the position
+    /// survives**: an app that writes a rating into the file later, by
+    /// copying it with new metadata, does not lose the place.
+    func testThePositionSurvivesImageIOCopyingTheFile() throws {
+        for kind in kinds where kind.pages == 1 && kind.container != .png {
             let scratch = try file(kind)
             try ExifGPS.setPosition(bixby, inFileAt: scratch.url, as: kind.container)
             let pixels = try see(scratch.url).pixels
@@ -261,7 +278,8 @@ final class ImageIOTests: XCTestCase {
             try ExifGPS.setPosition(sydney, inFileAt: scratch.url, as: kind.container)
             let after = try ExifTool.everything(scratch.url)
             assertSame(try ExifTool.position(scratch.url), sydney, kind.name, accuracy: 1e-7)
-            XCTAssertEqual(ExifTool.withoutPosition(after), ExifTool.withoutPosition(before), kind.name)
+            XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(after),
+                                              ExifTool.withoutPosition(before)), [], kind.name)
             XCTAssertNotNil(after["ImageDataHash"], kind.name)
         }
     }

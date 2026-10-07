@@ -13,7 +13,9 @@ import XCTest
 ///
 /// For each copy: a position is set, moved and taken out, and after each
 /// ExifTool must read the position asked for, find the picture's data
-/// unchanged by digest, and report every other tag as it was.
+/// unchanged by digest, and report every other tag as it was. Where the
+/// file's XMP packet stated a position, ExifTool must read the same one
+/// there after each write, and where it stated none, none.
 final class RealFileTests: XCTestCase {
 
     private var files: [URL] {
@@ -50,6 +52,10 @@ final class RealFileTests: XCTestCase {
 
             let before = try ExifTool.everything(copy)
             let had = try ExifTool.position(copy)
+            let stated = try ExifTool.packetPosition(copy) != nil
+            // A file with no EXIF gains some, and with it the tags any EXIF
+            // starts with.
+            let fresh = before["File:ExifByteOrder"] == nil
             let size = try size(copy)
             XCTAssertNotNil(before["ImageDataHash"], "no digest of the picture: \(name)")
             assertSame(try ExifGPS.position(inFileAt: copy, as: container), had, "reading, \(name)")
@@ -62,24 +68,67 @@ final class RealFileTests: XCTestCase {
                 continue
             }
             assertSame(try ExifTool.position(copy), first, "set, \(name)")
-            XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(try ExifTool.everything(copy)),
-                                              ExifTool.withoutPosition(before)), [], "set, \(name)")
+            assertSame(try ExifTool.blockPosition(copy), first, "set, in the EXIF, \(name)")
+            assertSame(try ExifTool.packetPosition(copy), stated ? first : nil, "set, in the packet, \(name)")
+            XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(try ExifTool.everything(copy), fresh: fresh),
+                                              ExifTool.withoutPosition(before, fresh: fresh)), [], "set, \(name)")
             let placed = try self.size(copy)
 
             try ExifGPS.setPosition(second, inFileAt: copy, as: container)
             assertSame(try ExifTool.position(copy), second, "moved, \(name)")
-            XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(try ExifTool.everything(copy)),
-                                              ExifTool.withoutPosition(before)), [], "moved, \(name)")
+            assertSame(try ExifTool.packetPosition(copy), stated ? second : nil, "moved, in the packet, \(name)")
+            XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(try ExifTool.everything(copy), fresh: fresh),
+                                              ExifTool.withoutPosition(before, fresh: fresh)), [], "moved, \(name)")
             XCTAssertEqual(try self.size(copy), placed, "moving it again grew the file: \(name)")
 
             try ExifGPS.setPosition(nil, inFileAt: copy, as: container)
             XCTAssertNil(try ExifTool.position(copy), "taken out, \(name)")
+            XCTAssertNil(try ExifTool.packetPosition(copy), "taken out, in the packet, \(name)")
             XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(try ExifTool.everything(copy)),
                                               ExifTool.withoutPosition(before)), [], "taken out, \(name)")
 
             summary[had == nil ? "had no position" : "had a position", default: 0] += 1
+            if stated { summary["stated it in its packet", default: 0] += 1 }
             summary["bytes added by the first write, most"] =
                 max(summary["bytes added by the first write, most"] ?? 0, placed - size)
+        }
+        print("RealFileTests: \(files.count) files.",
+              summary.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "; "))
+    }
+
+    /// **Which of your photographs would be refused, and why.** Every file
+    /// is taken as far as working out the write, and nothing is written, so
+    /// this reads the originals where they are. It needs no ExifTool and is
+    /// quick enough for a whole library:
+    ///
+    ///     EXIF_WRITER_REAL_FILES=/path/to/a/folder swift test --filter RealFileTests/testWhichWouldBeRefused
+    ///
+    /// A file this library does not write, such as a HEIC with no EXIF, is
+    /// counted. A file read as broken fails the test, because a photograph
+    /// other programs open is not broken and this would be misreading it.
+    func testWhichWouldBeRefused() throws {
+        let files = files
+        guard !files.isEmpty else { throw XCTSkip("EXIF_WRITER_REAL_FILES names no file this library writes") }
+        let place = GPSPosition(latitude: -33.856784, longitude: 151.215297)!
+        var summary: [String: Int] = [:]
+        for original in files {
+            let container = try XCTUnwrap(ImageContainer(pathExtension: original.pathExtension))
+            do {
+                switch container {
+                case .tiff:
+                    let handle = try FileHandle(forReadingFrom: original)
+                    defer { try? handle.close() }
+                    _ = try TIFFFile.plan(FileStore(handle), setting: place)
+                case .png, .heic:
+                    _ = try ExifGPS.settingPosition(place, in: Data(contentsOf: original, options: .mappedIfSafe),
+                                                    as: container)
+                }
+                summary["would be written", default: 0] += 1
+            } catch let error as ExifWriterError {
+                summary["refused: \(error)", default: 0] += 1
+                if case .unsupported = error { continue }
+                XCTFail("\(original.lastPathComponent): \(error)")
+            }
         }
         print("RealFileTests: \(files.count) files.",
               summary.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "; "))

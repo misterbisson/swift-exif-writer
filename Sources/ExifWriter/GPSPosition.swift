@@ -14,6 +14,27 @@ public struct GPSPosition: Equatable, Hashable, Sendable {
     }
 }
 
+/// **The position a file states in each of the two places it can**, apart.
+///
+/// For a caller that has to know which said it: one that writes the XMP
+/// with something else and needs to know whether the EXIF still wants
+/// writing, or one that wants to show where two disagree.
+public struct StatedPositions: Equatable, Hashable, Sendable {
+    /// What the GPS block of the file's EXIF states.
+    public let exif: GPSPosition?
+    /// What the file's XMP packet states.
+    public let xmp: GPSPosition?
+
+    /// The position the file states: the EXIF's, and where the EXIF has
+    /// none, the packet's.
+    public var position: GPSPosition? { exif ?? xmp }
+
+    public init(exif: GPSPosition?, xmp: GPSPosition?) {
+        self.exif = exif
+        self.xmp = xmp
+    }
+}
+
 extension GPSPosition {
     /// One axis as EXIF holds it: degrees, minutes and seconds, each a pair of
     /// unsigned 32-bit numbers, and the sign carried apart as a letter.

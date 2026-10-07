@@ -1,17 +1,18 @@
 import Foundation
 
-/// **A HEIC, as far as finding its EXIF and putting it back a different
-/// size.**
+/// **A HEIC, as far as finding its EXIF and its XMP packet and putting
+/// either back a different size.**
 ///
 /// A HEIC is a file of boxes, each a length and a four-letter type. The
 /// pictures and the metadata are *items*. One box, `iinf`, says what each
 /// item is, and another, `iloc`, says where in the file each item's bytes
 /// lie, as offsets from the start of the file. EXIF is the item of type
 /// `Exif`: four bytes giving the length of a prefix, the prefix, and then a
-/// TIFF structure.
+/// TIFF structure. The XMP packet is an item of type `mime` that says it
+/// holds `application/rdf+xml`.
 ///
-/// Because `iloc` holds file offsets, EXIF cannot simply grow. This does
-/// what ExifTool does: the EXIF is replaced where it lies, everything after
+/// Because `iloc` holds file offsets, neither can simply grow. This does
+/// what ExifTool does: the item is replaced where it lies, everything after
 /// it sits further along, the box it lies in is given its new length, and
 /// every offset in `iloc` that pointed past it is moved by the difference.
 /// Every other item's bytes are carried across as they were.
@@ -151,7 +152,8 @@ enum HEICFile {
         }
 
         /// **Moves every offset that points at or past `from` by `delta`**:
-        /// what sat after the EXIF sits that much further along.
+        /// what sat after the item that changed sits that much further
+        /// along.
         mutating func shift(from: Int, by delta: Int) throws {
             for index in items.indices where items[index].inTheFile {
                 if items[index].base >= from {
@@ -169,23 +171,34 @@ enum HEICFile {
         }
     }
 
-    // MARK: Finding the EXIF
+    // MARK: Finding an item
 
-    private struct Found {
+    /// The file as far as its list of items and where they lie.
+    private struct Layout {
         let top: [Box]
         let iloc: Box
         var locations: Locations
-        /// Which of `locations.items` is the EXIF.
-        let item: Int
-        /// The item's bytes in the file: the prefix length, the prefix, the
-        /// TIFF structure.
-        let payload: Range<Int>
-        /// The TIFF structure alone.
-        let tiff: Range<Int>
+        let listed: [Listed]
     }
 
-    /// Nil where the file has no EXIF item.
-    private static func find(_ bytes: [UInt8]) throws -> Found? {
+    /// One item as `iinf` lists it.
+    private struct Listed {
+        let id: Int
+        let type: String
+        /// What a `mime` item says it holds, and how that is encoded.
+        var content = ""
+        var encoding = ""
+    }
+
+    /// One item's bytes in the file.
+    private struct Found {
+        var layout: Layout
+        /// Which of `layout.locations.items` it is.
+        let item: Int
+        let payload: Range<Int>
+    }
+
+    private static func layout(_ bytes: [UInt8]) throws -> Layout {
         let top = try boxes(bytes, in: 0..<bytes.count)
         guard top.first?.type == "ftyp" else { throw ExifWriterError.notThisFormat("a HEIC") }
         guard let meta = top.first(where: { $0.type == "meta" }) else {
@@ -200,88 +213,176 @@ enum HEICFile {
               let iloc = children.first(where: { $0.type == "iloc" }) else {
             throw ExifWriterError.malformed("a HEIC with no list of its items")
         }
-        guard let id = try exifItem(bytes, iinf) else { return nil }
-
-        let locations = try Locations(Array(bytes[iloc.body]))
-        guard let item = locations.items.firstIndex(where: { $0.id == id }) else {
-            throw ExifWriterError.malformed("EXIF that is listed and not located")
-        }
-        let located = locations.items[item]
-        guard located.inTheFile, located.extents.count == 1 else {
-            throw ExifWriterError.unsupported("EXIF held in pieces, or outside the file's own data")
-        }
-        let start = located.base + located.extents[0].offset
-        let payload = start..<start + located.extents[0].length
-        guard payload.count >= 4, payload.upperBound <= bytes.count else {
-            throw ExifWriterError.malformed("EXIF that lies outside the file")
-        }
-        let prefix = big(bytes, start, 4)
-        guard 4 + prefix + 8 <= payload.count else { throw ExifWriterError.malformed("EXIF too short to be EXIF") }
-        return Found(top: top, iloc: iloc, locations: locations, item: item, payload: payload,
-                     tiff: start + 4 + prefix..<payload.upperBound)
+        return Layout(top: top, iloc: iloc, locations: try Locations(Array(bytes[iloc.body])),
+                      listed: try listed(bytes, iinf))
     }
 
-    /// The id of the item whose type is `Exif`, or nil where there is none.
-    private static func exifItem(_ bytes: [UInt8], _ iinf: Box) throws -> Int? {
+    private static func listed(_ bytes: [UInt8], _ iinf: Box) throws -> [Listed] {
         guard iinf.body.count >= 6 else { throw ExifWriterError.malformed("an item list cut short") }
         let version = Int(bytes[iinf.body.lowerBound])
         let entries = iinf.body.lowerBound + 4 + (version == 0 ? 2 : 4)
         guard entries <= iinf.end else { throw ExifWriterError.malformed("an item list cut short") }
+        var out: [Listed] = []
         for entry in try boxes(bytes, in: entries..<iinf.end) where entry.type == "infe" {
             guard entry.body.count >= 4 else { continue }
             let version = Int(bytes[entry.body.lowerBound])
-            // Before version 2 an entry has no type, and so is not EXIF.
+            // Before version 2 an entry has no type, and so is neither
+            // EXIF nor XMP.
             guard version >= 2 else { continue }
             let idSize = version == 2 ? 2 : 4
-            let at = entry.body.lowerBound + 4
+            var at = entry.body.lowerBound + 4
             guard at + idSize + 2 + 4 <= entry.end else { continue }
-            if String(decoding: bytes[at + idSize + 2..<at + idSize + 6], as: UTF8.self) == "Exif" {
-                return big(bytes, at, idSize)
+            var item = Listed(id: big(bytes, at, idSize),
+                              type: String(decoding: bytes[at + idSize + 2..<at + idSize + 6], as: UTF8.self))
+            at += idSize + 6
+            // Then the item's name, and for a `mime` item what it holds
+            // and how that is encoded, each ending in a zero. The last may
+            // be left off.
+            func text() -> String {
+                let end = bytes[at..<entry.end].firstIndex(of: 0) ?? entry.end
+                defer { at = min(end + 1, entry.end) }
+                return String(decoding: bytes[at..<end], as: UTF8.self)
             }
+            _ = text()
+            if item.type == "mime" {
+                item.content = text()
+                item.encoding = text()
+            }
+            out.append(item)
         }
-        return nil
+        return out
+    }
+
+    /// Where the item with this id lies. `what` names it in an error.
+    private static func find(_ id: Int, _ what: String, in layout: Layout, _ bytes: [UInt8]) throws -> Found {
+        guard let item = layout.locations.items.firstIndex(where: { $0.id == id }) else {
+            throw ExifWriterError.malformed("\(what) that is listed and not located")
+        }
+        let located = layout.locations.items[item]
+        guard located.inTheFile, located.extents.count == 1 else {
+            throw ExifWriterError.unsupported("\(what) held in pieces, or outside the file's own data")
+        }
+        let start = located.base + located.extents[0].offset
+        let payload = start..<start + located.extents[0].length
+        guard payload.upperBound <= bytes.count else {
+            throw ExifWriterError.malformed("\(what) that lies outside the file")
+        }
+        return Found(layout: layout, item: item, payload: payload)
+    }
+
+    /// The EXIF item, or nil where the file has none.
+    private static func exif(_ bytes: [UInt8]) throws -> Found? {
+        let layout = try layout(bytes)
+        guard let listed = layout.listed.first(where: { $0.type == "Exif" }) else { return nil }
+        return try find(listed.id, "EXIF", in: layout, bytes)
+    }
+
+    /// The TIFF structure in the EXIF item: what follows four bytes giving
+    /// the length of a prefix, and the prefix.
+    private static func structure(_ found: Found, _ bytes: [UInt8]) throws -> Range<Int> {
+        let start = found.payload.lowerBound
+        guard found.payload.count >= 4, 4 + big(bytes, start, 4) + 8 <= found.payload.count else {
+            throw ExifWriterError.malformed("EXIF too short to be EXIF")
+        }
+        return start + 4 + big(bytes, start, 4)..<found.payload.upperBound
+    }
+
+    /// The item that holds the XMP packet, or nil where the file has none:
+    /// a `mime` item that says it holds RDF. The item's bytes are the
+    /// packet and nothing else.
+    private static func packet(_ bytes: [UInt8]) throws -> Found? {
+        let layout = try layout(bytes)
+        guard let listed = layout.listed.first(where: { $0.type == "mime" && $0.content == "application/rdf+xml" })
+        else { return nil }
+        // One that is compressed cannot be read here, so what it states
+        // cannot be known.
+        guard listed.encoding.isEmpty else { throw ExifWriterError.unsupported("XMP that is compressed") }
+        return try find(listed.id, "XMP", in: layout, bytes)
     }
 
     // MARK: Reading and writing
 
+    /// The position the HEIC states: its EXIF's, and where that has none,
+    /// its XMP packet's.
     static func position(in bytes: [UInt8]) throws -> GPSPosition? {
-        guard let found = try find(bytes) else { return nil }
-        return try GPSBlock.position(in: ArrayStore(bytes: Array(bytes[found.tiff])))
+        try exifPosition(in: bytes) ?? packetPosition(in: bytes)
     }
 
-    /// The same HEIC with the position set, or with nil taken out. Nil
-    /// where there is nothing to change.
+    /// What the EXIF states and what the packet states, apart.
+    static func positions(in bytes: [UInt8]) throws -> StatedPositions {
+        StatedPositions(exif: try exifPosition(in: bytes), xmp: try packetPosition(in: bytes))
+    }
+
+    private static func exifPosition(in bytes: [UInt8]) throws -> GPSPosition? {
+        guard let found = try exif(bytes) else { return nil }
+        return try GPSBlock.position(in: ArrayStore(bytes: Array(bytes[try structure(found, bytes)])))
+    }
+
+    private static func packetPosition(in bytes: [UInt8]) throws -> GPSPosition? {
+        guard let found = try packet(bytes) else { return nil }
+        return try XMPPacket.position(in: Array(bytes[found.payload]))
+    }
+
+    /// The same HEIC with the position set, or with nil taken out, in its
+    /// EXIF and in its packet. Nil where there is nothing to change.
     static func setting(_ position: GPSPosition?, in bytes: [UInt8]) throws -> [UInt8]? {
-        guard var found = try find(bytes) else {
+        let described = try settingPacket(position, in: bytes)
+        let placed = try settingExif(position, in: described ?? bytes)
+        return placed ?? described
+    }
+
+    /// The same HEIC with its packet's position changed. Nil where there is
+    /// no packet, or it states no position, or it already states this one.
+    private static func settingPacket(_ position: GPSPosition?, in bytes: [UInt8]) throws -> [UInt8]? {
+        guard let found = try packet(bytes) else { return nil }
+        let old = Array(bytes[found.payload])
+        guard let new = try XMPPacket.setting(position, in: old), new != old else { return nil }
+        return try replacing(found, "XMP", with: new, in: bytes)
+    }
+
+    private static func settingExif(_ position: GPSPosition?, in bytes: [UInt8]) throws -> [UInt8]? {
+        guard let found = try exif(bytes) else {
             guard position != nil else { return nil }
             throw ExifWriterError.unsupported("a HEIC with no EXIF")
         }
-        let held = Array(bytes[found.tiff])
+        let tiff = try structure(found, bytes)
+        let held = Array(bytes[tiff])
         let edit = try GPSBlock.plan(ArrayStore(bytes: held), setting: position)
         guard !edit.isEmpty || edit.leavesNothing else { return nil }
         // EXIF that said nothing but the position keeps its item, and says
         // nothing: taking an item out of a HEIC is more than this does.
         let structure = edit.leavesNothing ? GPSBlock.empty() : edit.applied(to: held)
-        let written = Array(bytes[found.payload.lowerBound..<found.tiff.lowerBound]) + structure
+        return try replacing(found, "EXIF", with: Array(bytes[found.payload.lowerBound..<tiff.lowerBound]) + structure,
+                             in: bytes)
+    }
+
+    /// **The file with one item's bytes replaced by `written`**, which may
+    /// be longer or shorter: everything after sits that much further along,
+    /// the box it lies in is given its new length, and every offset that
+    /// pointed past it is moved by the difference.
+    private static func replacing(_ found: Found, _ what: String, with written: [UInt8],
+                                  in bytes: [UInt8]) throws -> [UInt8] {
+        var found = found
         let delta = written.count - found.payload.count
 
-        // The box the EXIF lies in grows with it.
-        guard let holder = found.top.first(where: { $0.start <= found.payload.lowerBound && found.payload.upperBound <= $0.end }),
-              holder.type == "mdat" else {
-            throw ExifWriterError.unsupported("EXIF that is not in the file's data box")
+        // The box the item lies in grows with it.
+        guard let holder = found.layout.top.first(where: {
+            $0.start <= found.payload.lowerBound && found.payload.upperBound <= $0.end
+        }), holder.type == "mdat" else {
+            throw ExifWriterError.unsupported("\(what) that is not in the file's data box")
         }
 
-        found.locations.items[found.item].extents[0].length = written.count
-        try found.locations.shift(from: found.payload.upperBound, by: delta)
-        let locations = try found.locations.body()
-        guard locations.count == found.iloc.body.count else {
+        found.layout.locations.items[found.item].extents[0].length = written.count
+        try found.layout.locations.shift(from: found.payload.upperBound, by: delta)
+        let locations = try found.layout.locations.body()
+        guard locations.count == found.layout.iloc.body.count else {
             throw ExifWriterError.malformed("an item location box that does not read back at its own length")
         }
 
         var out = bytes
         // The two edits that change no lengths are made first, where
-        // everything still is. Then the EXIF, which moves what follows it.
-        out.replaceSubrange(found.iloc.body, with: locations)
+        // everything still is. Then the item, which moves what follows it.
+        out.replaceSubrange(found.layout.iloc.body, with: locations)
         if !holder.toTheEnd {
             let size = holder.size + delta
             if holder.header == 16 {

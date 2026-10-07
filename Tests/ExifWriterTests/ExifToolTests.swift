@@ -79,6 +79,34 @@ final class ExifToolTests: XCTestCase {
         }
     }
 
+    /// **The packet's copy is what the EXIF is**, as ExifTool reads the two
+    /// apart: set where the packet stated one, gone where it is taken out,
+    /// and never added to a packet that stated none.
+    func testThePacketsCopyAgreesWithTheEXIF() throws {
+        XCTAssertTrue(Sample.all.contains { $0.statesItInItsPacket }, "no sample states it there")
+        for sample in Sample.all {
+            let file = try sample.scratch()
+            XCTAssertEqual(try ExifTool.packetPosition(file.url) != nil, sample.statesItInItsPacket,
+                           "the sample is not what it is said to be: \(sample.name)")
+            for place in [bixby, sydney] {
+                try ExifGPS.setPosition(place, inFileAt: file.url, as: sample.container)
+                let read = try ExifTool.packetPosition(file.url)
+                guard sample.statesItInItsPacket else {
+                    XCTAssertNil(read, sample.name)
+                    continue
+                }
+                XCTAssertEqual(read?.latitude ?? .nan, place.latitude, accuracy: 1e-7, sample.name)
+                XCTAssertEqual(read?.longitude ?? .nan, place.longitude, accuracy: 1e-7, sample.name)
+                let block = try ExifTool.blockPosition(file.url)
+                XCTAssertEqual(block?.latitude ?? .nan, place.latitude, accuracy: 1e-7, sample.name)
+                XCTAssertEqual(block?.longitude ?? .nan, place.longitude, accuracy: 1e-7, sample.name)
+            }
+            try ExifGPS.setPosition(nil, inFileAt: file.url, as: sample.container)
+            XCTAssertNil(try ExifTool.packetPosition(file.url), sample.name)
+            XCTAssertNil(try ExifTool.blockPosition(file.url), sample.name)
+        }
+    }
+
     // MARK: - This library reads what ExifTool wrote
 
     func testThisReadsThePositionExifToolWrote() throws {
@@ -129,6 +157,8 @@ struct Sample {
     let name: String
     let container: ImageContainer
     let bytes: [UInt8]
+    /// The file's XMP packet states a position.
+    var statesItInItsPacket = false
 
     func scratch() throws -> Scratch {
         try Scratch(bytes, extension: container.fileExtension)
@@ -165,6 +195,37 @@ struct Sample {
         Sample(name: "HEIC ImageIO wrote", container: .heic, bytes: drawn("drawn")),
         Sample(name: "HEIC ImageIO wrote with a camera's position", container: .heic,
                bytes: drawn("drawn-camera")),
+    ] + withPackets
+
+    private static let lightroom = XMPFixture(style: .lightroom, padding: 17)
+    private static let exifTool = XMPFixture(style: .exifTool)
+    private static let imageIO = XMPFixture(style: .imageIO)
+
+    /// Files whose XMP packet states the position too, or alone, laid out
+    /// as three writers lay a packet out.
+    private static let withPackets: [Sample] = [
+        Sample(name: "TIFF, a packet with room that states it too", container: .tiff,
+               bytes: Fixture(block: camera, packet: XMPFixture(style: .lightroom, padding: 60).bytes()).bytes(),
+               statesItInItsPacket: true),
+        Sample(name: "TIFF, big, a packet with no room that states it too", container: .tiff,
+               bytes: Fixture(little: false, block: camera, packet: imageIO.bytes()).bytes(),
+               statesItInItsPacket: true),
+        Sample(name: "TIFF, block last, a packet with no room", container: .tiff,
+               bytes: Fixture(block: camera, blockLast: true, packet: exifTool.bytes()).bytes(),
+               statesItInItsPacket: true),
+        Sample(name: "TIFF, only its packet states it", container: .tiff,
+               bytes: Fixture(packet: exifTool.bytes()).bytes(), statesItInItsPacket: true),
+        Sample(name: "TIFF, a packet that states none", container: .tiff,
+               bytes: Fixture(block: camera, packet: lightroom.stating(nil).bytes()).bytes()),
+        Sample(name: "PNG as Lightroom exports one, only its packet stating it", container: .png,
+               bytes: PNGFixture(packet: lightroom.bytes()).bytes(), statesItInItsPacket: true),
+        Sample(name: "PNG, EXIF and a packet both stating it", container: .png,
+               bytes: PNGFixture(exif: .holding(Fixture(block: camera).bytes()), packet: imageIO.bytes()).bytes(),
+               statesItInItsPacket: true),
+        Sample(name: "PNG, a packet that states none", container: .png,
+               bytes: PNGFixture(packet: exifTool.stating(nil).bytes()).bytes()),
+        Sample(name: "HEIC ImageIO wrote with the position in its packet too", container: .heic,
+               bytes: drawn("drawn-xmp"), statesItInItsPacket: true),
     ]
 }
 
@@ -256,9 +317,13 @@ enum ExifTool {
         }
     }
 
+    /// The position, in the EXIF and in the XMP packet, and what ExifTool
+    /// works out from either.
     private static let position: Set<String> = [
         "GPS:GPSLatitude", "GPS:GPSLatitudeRef", "GPS:GPSLongitude", "GPS:GPSLongitudeRef",
+        "XMP-exif:GPSLatitude", "XMP-exif:GPSLatitudeRef", "XMP-exif:GPSLongitude", "XMP-exif:GPSLongitudeRef",
         "Composite:GPSLatitude", "Composite:GPSLongitude", "Composite:GPSPosition",
+        "Composite:GPSLatitudeRef", "Composite:GPSLongitudeRef",
     ]
 
     /// What a file gains when it had no EXIF at all and is given some: the
@@ -292,9 +357,15 @@ enum ExifTool {
     /// For comparing two writers' files: positions rounded to what both
     /// keep, and the plumbing left out. Where the picture's data sits is
     /// plumbing here, because ExifTool lays the file out afresh.
+    ///
+    /// ExifTool writes a packet out afresh when it changes one, and signs
+    /// it as its own. This library changes the values and leaves the name
+    /// of whoever wrote the packet.
     static func comparable(_ tags: [String: String], fresh: Bool = false) -> [String: String] {
-        var out = withoutPosition(tags, fresh: fresh).filter { !$0.key.hasSuffix(":StripOffsets") }
-        for key in ["Composite:GPSLatitude", "Composite:GPSLongitude"] {
+        var out = withoutPosition(tags, fresh: fresh)
+            .filter { !$0.key.hasSuffix(":StripOffsets") && $0.key != "XMP-x:XMPToolkit" }
+        for key in ["Composite:GPSLatitude", "Composite:GPSLongitude",
+                    "XMP-exif:GPSLatitude", "XMP-exif:GPSLongitude"] {
             out[key] = tags[key].flatMap(Double.init).map { String(format: "%.6f", $0) }
         }
         out["GPS:GPSVersionID"] = tags["GPS:GPSVersionID"]
@@ -308,18 +379,45 @@ enum ExifTool {
             .map { "\($0): \(a[$0] ?? "absent") | \(b[$0] ?? "absent")" }
     }
 
+    /// The position the file states: the EXIF's, and where the EXIF has
+    /// none, the XMP packet's.
+    ///
+    /// Not ExifTool's own `Composite:GPSLatitude`, which it works out from
+    /// the EXIF alone: for a file that states its position only in its
+    /// packet, as Lightroom's PNGs do, there is none, and a check made
+    /// against it would pass a file that still said where it was.
     static func position(_ url: URL) throws -> GPSPosition? {
+        try blockPosition(url) ?? packetPosition(url)
+    }
+
+    /// The position the XMP packet states, as ExifTool reads it, with
+    /// the EXIF left out.
+    static func packetPosition(_ url: URL) throws -> GPSPosition? {
         let tags = try everything(url)
-        guard let latitude = tags["Composite:GPSLatitude"].flatMap(Double.init),
-              let longitude = tags["Composite:GPSLongitude"].flatMap(Double.init) else { return nil }
+        guard let latitude = tags["XMP-exif:GPSLatitude"].flatMap(Double.init),
+              let longitude = tags["XMP-exif:GPSLongitude"].flatMap(Double.init) else { return nil }
         return GPSPosition(latitude: latitude, longitude: longitude)
     }
 
+    /// The position the EXIF states, as ExifTool reads it, with the packet
+    /// left out.
+    static func blockPosition(_ url: URL) throws -> GPSPosition? {
+        let tags = try everything(url)
+        guard let latitude = tags["GPS:GPSLatitude"].flatMap(Double.init),
+              let longitude = tags["GPS:GPSLongitude"].flatMap(Double.init) else { return nil }
+        return GPSPosition(latitude: tags["GPS:GPSLatitudeRef"] == "S" ? -latitude : latitude,
+                           longitude: tags["GPS:GPSLongitudeRef"] == "W" ? -longitude : longitude)
+    }
+
+    /// **Signed numbers, and each name with a star.** The star takes in
+    /// the tag that holds the hemisphere, and ExifTool works that out of
+    /// the sign. Given a number without a sign and the hemisphere as a tag
+    /// of its own, ExifTool 13.55 writes the EXIF right and the XMP packet's
+    /// copy as north and east whatever was asked: XMP holds the hemisphere
+    /// in the value, and the value it was given had none.
     static func setPosition(_ position: GPSPosition, _ url: URL) throws {
         try run(["-q", "-overwrite_original",
-                 "-GPSLatitude=\(abs(position.latitude))", "-GPSLatitudeRef=\(position.latitude < 0 ? "S" : "N")",
-                 "-GPSLongitude=\(abs(position.longitude))",
-                 "-GPSLongitudeRef=\(position.longitude < 0 ? "W" : "E")", url.path])
+                 "-GPSLatitude*=\(position.latitude)", "-GPSLongitude*=\(position.longitude)", url.path])
     }
 
     /// What ExifTool's own validation says is wrong with the file: each

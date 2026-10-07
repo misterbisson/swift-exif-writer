@@ -22,30 +22,40 @@ public enum ImageContainer: Sendable, CaseIterable {
     }
 }
 
-/// **Reads and writes the position in a photograph's EXIF without touching
+/// **Reads and writes the position a photograph states without touching
 /// the picture.** No decode and no re-encode.
+///
+/// The position is the GPS block of the file's EXIF. A file can state it a
+/// second time in its XMP packet, and some state it only there. Setting a
+/// position writes the EXIF, and changes the packet's copy where the packet
+/// has one, so the two agree. A packet that states none is left as it was,
+/// and no packet is made.
 public enum ExifGPS {
 
-    /// The position the file states, or nil where it states none.
+    /// The position the file states, or nil where it states none: the
+    /// EXIF's, and where the EXIF has none, the XMP packet's.
     public static func position(inFileAt url: URL, as container: ImageContainer) throws -> GPSPosition? {
         switch container {
         case .tiff:
             let handle = try FileHandle(forReadingFrom: url)
             defer { try? handle.close() }
-            return try GPSBlock.position(in: FileStore(handle))
+            return try TIFFFile.position(in: FileStore(handle))
         case .png, .heic:
             return try position(in: Data(contentsOf: url), as: container)
         }
     }
 
-    /// **Sets the file's position, or with nil takes it out.** Returns
-    /// whether the file was changed: taking a position out of a file that
-    /// has none changes nothing.
+    /// **Sets the file's position, or with nil takes it out**, in its EXIF
+    /// and in its XMP packet where the packet states one. Returns whether
+    /// the file was changed: taking a position out of a file that has none
+    /// changes nothing.
     ///
-    /// **A TIFF is edited where it stands.** The new block is written first
-    /// and the few bytes that point at it last, so an interrupted write
-    /// leaves the picture and the rest of its metadata readable. A caller
-    /// that needs all or nothing writes into a copy and moves it into place.
+    /// **A TIFF is edited where it stands.** What is new is written at the
+    /// end first and the few bytes that point at it last, so an interrupted
+    /// write leaves the picture and the rest of its metadata readable. The
+    /// packet's copy is the exception where it fits: those few bytes are
+    /// overwritten where they lie. A caller that needs all or nothing
+    /// writes into a copy and moves it into place.
     ///
     /// **A PNG or a HEIC is written whole to a new file beside it, which
     /// then takes its place**, because what follows the EXIF has to move
@@ -57,7 +67,7 @@ public enum ExifGPS {
         case .tiff:
             let handle = try FileHandle(forUpdating: url)
             defer { try? handle.close() }
-            let edit = try GPSBlock.plan(FileStore(handle), setting: position)
+            let edit = try TIFFFile.plan(FileStore(handle), setting: position)
             guard !edit.leavesNothing else { throw onlyAPosition }
             guard !edit.isEmpty else { return false }
             try edit.apply(to: handle)
@@ -74,7 +84,7 @@ public enum ExifGPS {
     /// The position the bytes state, or nil where they state none.
     public static func position(in data: Data, as container: ImageContainer) throws -> GPSPosition? {
         switch container {
-        case .tiff: return try GPSBlock.position(in: ArrayStore(bytes: [UInt8](data)))
+        case .tiff: return try TIFFFile.position(in: ArrayStore(bytes: [UInt8](data)))
         case .png: return try PNGFile.position(in: [UInt8](data))
         case .heic: return try HEICFile.position(in: [UInt8](data))
         }
@@ -86,7 +96,7 @@ public enum ExifGPS {
         let bytes = [UInt8](data)
         switch container {
         case .tiff:
-            let edit = try GPSBlock.plan(ArrayStore(bytes: bytes), setting: position)
+            let edit = try TIFFFile.plan(ArrayStore(bytes: bytes), setting: position)
             guard !edit.leavesNothing else { throw onlyAPosition }
             return Data(edit.applied(to: bytes))
         case .png:

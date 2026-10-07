@@ -24,6 +24,13 @@ final class ImageIOTests: XCTestCase {
         var camera = false
         /// Written with no properties at all, so the file has no EXIF.
         var bare = false
+        /// The file's XMP packet states the camera's position too, in a
+        /// packet ImageIO laid out. Not for a PNG, where ImageIO puts it
+        /// there unasked (`statesItInXMPToo`).
+        var inPacket = false
+        /// The packet's padding is taken away, so a longer position does
+        /// not fit where the packet lies. ImageIO pads a TIFF's packet.
+        var packetHasNoRoom = false
 
         /// **ImageIO writes a camera's position into a PNG twice**: in the
         /// EXIF, and again in the XMP packet beside it. Measured on macOS
@@ -53,6 +60,11 @@ final class ImageIOTests: XCTestCase {
         Kind(name: "PNG with no metadata", container: .png, bare: true),
         Kind(name: "HEIC", container: .heic, drawn: "drawn"),
         Kind(name: "HEIC with a camera's position", container: .heic, camera: true, drawn: "drawn-camera"),
+        Kind(name: "TIFF with the position in its packet too", camera: true, inPacket: true),
+        Kind(name: "TIFF with the position in a packet with no room", camera: true, inPacket: true,
+             packetHasNoRoom: true),
+        Kind(name: "HEIC with the position in its packet too", container: .heic, camera: true, inPacket: true,
+             drawn: "drawn-xmp"),
     ]
 
     private func image(bits: Int, seed: Int) throws -> CGImage {
@@ -99,7 +111,64 @@ final class ImageIOTests: XCTestCase {
                                        kind.bare ? nil : properties as CFDictionary)
         }
         XCTAssertTrue(CGImageDestinationFinalize(destination))
-        return scratch
+        return kind.inPacket ? try statingItInItsPacket(scratch, kind) : scratch
+    }
+
+    /// **The same file with the camera's position in its XMP packet.**
+    /// ImageIO will not write `exif:GPSLatitude` into a packet, so it is
+    /// asked for the two values under a namespace one letter off, and the
+    /// letter is then put right in the file's bytes. The same length, so
+    /// nothing in the file moves. `drawn-xmp.heic` was made the same way.
+    private func statingItInItsPacket(_ scratch: Scratch, _ kind: Kind) throws -> Scratch {
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(scratch.url as CFURL, nil))
+        let packet = CGImageMetadataCreateMutable()
+        XCTAssertTrue(CGImageMetadataRegisterNamespaceForPrefix(
+            packet, "http://ns.adobe.com/exiq/1.0/" as CFString, "exiq" as CFString, nil))
+        CGImageMetadataSetValueWithPath(packet, nil, "exiq:GPSLatitude" as CFString, "36,36.366660N" as CFString)
+        CGImageMetadataSetValueWithPath(packet, nil, "exiq:GPSLongitude" as CFString, "118,3.766680W" as CFString)
+        // Something only the packet says, so a test can ask ImageIO for it
+        // and know the packet is still one it reads.
+        CGImageMetadataSetValueWithPath(packet, nil, "xmp:CreatorTool" as CFString, "Fixture" as CFString)
+        let staged = try Scratch([], extension: kind.fileExtension)
+        let copy = try XCTUnwrap(CGImageDestinationCreateWithURL(staged.url as CFURL, kind.type as CFString, 1, nil))
+        let options: [CFString: Any] = [kCGImageDestinationMetadata: packet, kCGImageDestinationMergeMetadata: true]
+        XCTAssertTrue(CGImageDestinationCopyImageSource(copy, source, options as CFDictionary, nil), kind.name)
+
+        var bytes = [UInt8](try Data(contentsOf: staged.url))
+        let wrong = [UInt8]("exiq".utf8)
+        for index in bytes.indices.dropLast(3) where Array(bytes[index..<index + 4]) == wrong {
+            bytes[index + 3] = UInt8(ascii: "f")
+        }
+        // A packet that already named the real namespace now names it
+        // twice, which is not XML, and ImageIO answers that by reading none
+        // of the packet. The second naming is blanked, at the same length.
+        let naming = [UInt8](#"xmlns:exif="http://ns.adobe.com/exif/1.0/""#.utf8)
+        let named = bytes.indices.dropLast(naming.count).filter {
+            bytes[$0] == naming[0] && Array(bytes[$0..<$0 + naming.count]) == naming
+        }
+        XCTAssertLessThanOrEqual(named.count, 2, kind.name)
+        if named.count == 2 {
+            bytes.replaceSubrange(named[1]..<named[1] + naming.count,
+                                  with: [UInt8](repeating: UInt8(ascii: " "), count: naming.count))
+        }
+        if kind.packetHasNoRoom {
+            // The packet is written again where it lies without its
+            // padding, and the directory told its new length.
+            let tiff = try TIFFStructure(ArrayStore(bytes: bytes))
+            let root = try tiff.directory(at: tiff.first)
+            let index = try XCTUnwrap(root.index(of: TIFFStructure.xmpPacket))
+            let held = try XCTUnwrap(try Read.packet(bytes))
+            var tight = held.bytes
+            while let shorter = XMPPacket.fitted(tight, to: tight.count - 1) { tight = shorter }
+            XCTAssertLessThan(tight.count, held.bytes.count, "the packet had no padding to take away")
+            bytes.replaceSubrange(held.offset..<held.offset + tight.count, with: tight)
+            bytes.replaceSubrange(root.countOffset(of: index)..<root.countOffset(of: index) + 4,
+                                  with: tiff.bytes(UInt32(tight.count)))
+        }
+        let out = try Scratch(bytes, extension: kind.fileExtension)
+        XCTAssertEqual(try see(out.url).creator, "Fixture", "ImageIO does not read the fixture's packet: \(kind.name)")
+        XCTAssertNotNil(try ExifGPS.position(inFileAt: out.url, as: kind.container), kind.name)
+        return out
     }
 
     /// What ImageIO reports about one page: its position, everything else,
@@ -109,6 +178,9 @@ final class ImageIOTests: XCTestCase {
         var gps: [CFString: Any]
         var rest: NSDictionary
         var pixels: Data
+        /// What the XMP packet says wrote the file, which nothing else in
+        /// the file says: nil where ImageIO does not read the packet.
+        var creator: String?
     }
 
     private func see(_ url: URL, page: Int = 0) throws -> Seen {
@@ -125,8 +197,11 @@ final class ImageIOTests: XCTestCase {
             position = GPSPosition(latitude: south ? -latitude : latitude, longitude: west ? -longitude : longitude)
         }
         let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, page, nil))
+        let creator = CGImageSourceCopyMetadataAtIndex(source, page, nil).flatMap {
+            CGImageMetadataCopyStringValueWithPath($0, nil, "xmp:CreatorTool" as CFString) as String?
+        }
         return Seen(position: position, gps: gps, rest: all as NSDictionary,
-                    pixels: try XCTUnwrap(image.dataProvider?.data as Data?))
+                    pixels: try XCTUnwrap(image.dataProvider?.data as Data?), creator: creator)
     }
 
     /// **ImageIO gives a position back to a ten-thousandth of a minute**,
@@ -183,7 +258,7 @@ final class ImageIOTests: XCTestCase {
     /// **Taken out, ImageIO reads no position**, and the same picture and
     /// the same everything else.
     func testImageIOReadsNoPositionOnceItIsTakenOut() throws {
-        for kind in kinds where !kind.statesItInXMPToo {
+        for kind in kinds {
             let scratch = try file(kind)
             let before = try see(scratch.url)
             if !kind.camera { try ExifGPS.setPosition(bixby, inFileAt: scratch.url, as: kind.container) }
@@ -196,22 +271,66 @@ final class ImageIOTests: XCTestCase {
         }
     }
 
-    /// **A position the file's XMP states is not this library's to change.**
-    /// It writes the EXIF. Taken out of a PNG that ImageIO wrote a camera's
-    /// position into, the EXIF has none, the XMP packet is the bytes it was,
-    /// and ImageIO goes on reading the position from there. Whoever writes
-    /// the XMP has to take it out of that too.
-    func testAPositionInXMPIsLeftAsItWas() throws {
-        for kind in kinds where kind.statesItInXMPToo {
-            let scratch = try file(kind)
-            func packet() throws -> [[UInt8]] {
-                try Read.chunks([UInt8](try Data(contentsOf: scratch.url))).filter { $0.type == "iTXt" }.map(\.bytes)
+    /// **A packet ImageIO wrote is changed with the EXIF, and ImageIO still
+    /// reads it.** The packet's position is the one set, what else the
+    /// packet says is still read, and the picture and every other property
+    /// are what they were.
+    ///
+    /// Each file is taken two ways: a position that is longer than the
+    /// camera's first, and a shorter one first. ImageIO pads a TIFF's
+    /// packet, so both fit where the packet lies. One TIFF has its padding
+    /// taken away, and its packet moves to the end of the file for the
+    /// longer position.
+    func testImageIOStillReadsAPacketThisChanged() throws {
+        let near = GPSPosition(latitude: 5.5, longitude: 8.25)!
+        XCTAssertTrue(kinds.contains { $0.inPacket || $0.statesItInXMPToo })
+        for kind in kinds where kind.inPacket || kind.statesItInXMPToo {
+            for places in [[sydney, near, nil], [near, sydney, nil]] {
+                let scratch = try file(kind)
+                let before = try see(scratch.url)
+                let lay = kind.container == .tiff ? try Read.packet([UInt8](try Data(contentsOf: scratch.url))) : nil
+                for place in places {
+                    try ExifGPS.setPosition(place, inFileAt: scratch.url, as: kind.container)
+                    let after = try see(scratch.url)
+                    let message = "\(kind.name), \(place.map { "\($0.latitude)" } ?? "taken out")"
+                    // Both ways are taken: a packet with no room moves for
+                    // the longer position, and any other stays.
+                    if let lay, place == places[0] {
+                        let now = try XCTUnwrap(try Read.packet([UInt8](try Data(contentsOf: scratch.url))))
+                        XCTAssertEqual(now.offset != lay.offset, kind.packetHasNoRoom && place == sydney, message)
+                    }
+                    XCTAssertEqual(after.creator, before.creator, "the packet is not read as it was: \(message)")
+                    XCTAssertEqual(after.pixels, before.pixels, message)
+                    XCTAssertEqual(after.rest, before.rest, message)
+                    let packet = try packet(scratch.url, kind)
+                    if let place {
+                        assertSame(after.position, place, message)
+                        assertSame(try XMPPacket.position(in: packet), place, message, accuracy: 1e-7)
+                    } else {
+                        XCTAssertNil(after.position, message)
+                        XCTAssertEqual(try XMPPacket.statements(in: packet), [], message)
+                    }
+                }
+                // A packet the position was taken out of states none, and
+                // is not given one again: the EXIF is.
+                try ExifGPS.setPosition(bixby, inFileAt: scratch.url, as: kind.container)
+                assertSame(try see(scratch.url).position, bixby, kind.name)
+                XCTAssertEqual(try XMPPacket.statements(in: try packet(scratch.url, kind)), [], kind.name)
+                XCTAssertEqual(try see(scratch.url).creator, before.creator, kind.name)
             }
-            let before = try packet()
-            XCTAssertEqual(before.count, 1, kind.name)
-            try ExifGPS.setPosition(nil, inFileAt: scratch.url, as: kind.container)
-            XCTAssertNil(try ExifGPS.position(inFileAt: scratch.url, as: kind.container), kind.name)
-            XCTAssertEqual(try packet(), before, kind.name)
+        }
+    }
+
+    /// The file's XMP packet, found the way each kind of file holds one.
+    private func packet(_ url: URL, _ kind: Kind) throws -> [UInt8] {
+        let bytes = [UInt8](try Data(contentsOf: url))
+        switch kind.container {
+        case .tiff: return try XCTUnwrap(try Read.packet(bytes)).bytes
+        case .png: return try XCTUnwrap(try Read.packet(png: bytes))
+        case .heic:
+            let packets = try Read.items(bytes).values.filter { $0.starts(with: [UInt8]("<x:xmpmeta".utf8)) }
+            XCTAssertEqual(packets.count, 1, kind.name)
+            return try XCTUnwrap(packets.first)
         }
     }
 
@@ -241,7 +360,7 @@ final class ImageIOTests: XCTestCase {
     /// asserted is the way round it: set the position after the copy, and
     /// it is there.
     func testAfterImageIOCopiesAPNGThePositionIsSetAgain() throws {
-        for kind in kinds where kind.container == .png && !kind.statesItInXMPToo {
+        for kind in kinds where kind.container == .png {
             let scratch = try file(kind)
             try ExifGPS.setPosition(bixby, inFileAt: scratch.url, as: kind.container)
             let pixels = try see(scratch.url).pixels

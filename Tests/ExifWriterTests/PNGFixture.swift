@@ -15,6 +15,11 @@ struct PNGFixture {
     /// Put the EXIF after the picture's data, where the format also allows
     /// it and some writers leave it.
     var exifLast = false
+    /// An XMP packet, held as the format holds one.
+    var packet: [UInt8]?
+    /// Say the packet's chunk is compressed, which this library cannot
+    /// read.
+    var packetCompressed = false
     var width = 6
     var height = 5
 
@@ -25,6 +30,10 @@ struct PNGFixture {
         out += PNGFile.chunk(tag("IHDR"), big(UInt32(width)) + big(UInt32(height)) + [8, 0, 0, 0, 0])
         out += PNGFile.chunk(tag("pHYs"), big(11811) + big(11811) + [1])
         out += PNGFile.chunk(tag("tEXt"), [UInt8]("Comment".utf8) + [0] + [UInt8]("kept as it was".utf8))
+        if let packet {
+            let flags: [UInt8] = [packetCompressed ? 1 : 0, 0, 0, 0]
+            out += PNGFile.chunk(tag("iTXt"), [UInt8]("XML:com.adobe.xmp".utf8) + [0] + flags + packet)
+        }
         if case .holding(let held) = exif, !exifLast { out += PNGFile.chunk(tag("eXIf"), held) }
         // Split in two, as a real encoder splits a picture's data.
         let stream = zlib(scanlines)
@@ -71,6 +80,19 @@ extension Read {
     /// Every chunk but the EXIF, which is what a write must leave alone.
     static func otherChunks(_ bytes: [UInt8]) throws -> [[UInt8]] {
         try chunks(bytes).filter { $0.type != "eXIf" }.map(\.bytes)
+    }
+
+    /// Every chunk but the EXIF and the XMP packet, which is what a write
+    /// must leave alone in a file whose packet states a position.
+    static func chunksBesideMetadata(_ bytes: [UInt8]) throws -> [[UInt8]] {
+        try chunks(bytes).filter { $0.type != "eXIf" && $0.type != "iTXt" }.map(\.bytes)
+    }
+
+    /// The XMP packet: the text of the chunk that holds one.
+    static func packet(png bytes: [UInt8]) throws -> [UInt8]? {
+        let lead = [UInt8]("XML:com.adobe.xmp".utf8) + [0, 0, 0, 0, 0]
+        return try PNGFile.chunks(bytes).first { $0.type == [UInt8]("iTXt".utf8) }
+            .map { Array(bytes[$0.data].dropFirst(lead.count)) }
     }
 
     static func exif(_ bytes: [UInt8]) throws -> [UInt8]? {

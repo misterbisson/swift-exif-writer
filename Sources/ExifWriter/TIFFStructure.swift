@@ -8,6 +8,8 @@ import Foundation
 /// byte. Offset 0 of the store is the structure's first byte either way.
 struct TIFFStructure {
     static let gpsPointer: UInt16 = 0x8825
+    /// The tag a TIFF file's first directory holds its XMP packet under.
+    static let xmpPacket: UInt16 = 700
 
     /// One tag in a directory. `value` is the four bytes the entry holds:
     /// the value itself where it fits, and otherwise where it is.
@@ -50,6 +52,10 @@ struct TIFFStructure {
 
         /// Where entry `index` keeps its four value bytes.
         func valueOffset(of index: Int) -> Int { offset + 2 + 12 * index + 8 }
+
+        /// Where entry `index` keeps its count, which its value bytes
+        /// follow.
+        func countOffset(of index: Int) -> Int { offset + 2 + 12 * index + 4 }
     }
 
     let store: ByteStore

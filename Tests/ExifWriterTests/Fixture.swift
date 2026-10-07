@@ -18,6 +18,8 @@ struct Fixture {
     /// Put the block after the first directory, as the last thing in the
     /// file, where another writer may have left it.
     var blockLast = false
+    /// An XMP packet for the first directory to point at.
+    var packet: [UInt8]?
     var width = 6
     var height = 5
 
@@ -30,6 +32,12 @@ struct Fixture {
         out += pixels
         if out.count % 2 == 1 { out.append(0) }
 
+        let packetOffset = out.count
+        if let packet {
+            out += packet
+            if out.count % 2 == 1 { out.append(0) }
+        }
+
         var blockOffset: UInt32?
         if block != .none, !blockLast { blockOffset = UInt32(out.count); out += gpsBlock(at: out.count) }
 
@@ -39,6 +47,7 @@ struct Fixture {
             entry(273, 4, 1, u32(UInt32(strip))), entry(277, 3, 1, short(1)),
             entry(278, 3, 1, short(UInt16(height))), entry(279, 4, 1, u32(UInt32(width * height))),
         ]
+        if let packet { entries.append(entry(700, 1, UInt32(packet.count), u32(UInt32(packetOffset)))) }
         let root = out.count
         let rootLength = 2 + 12 * (entries.count + (block == .none ? 0 : 1)) + 4
         if block != .none {
@@ -113,6 +122,14 @@ enum Read {
         let tiff = try TIFFStructure(ArrayStore(bytes: bytes))
         guard let entry = try block(bytes)?.entry(6), let raw = try tiff.value(of: entry) else { return nil }
         return Double(tiff.u32(raw, 0)) / Double(tiff.u32(raw, 4))
+    }
+
+    /// The XMP packet the first directory points at, and where it lies.
+    static func packet(_ bytes: [UInt8]) throws -> (offset: Int, bytes: [UInt8])? {
+        let tiff = try TIFFStructure(ArrayStore(bytes: bytes))
+        let root = try tiff.directory(at: tiff.first)
+        guard let entry = root.entry(TIFFStructure.xmpPacket), let held = try tiff.value(of: entry) else { return nil }
+        return (Int(tiff.u32(entry.value, 0)), held)
     }
 
     /// The picture's own bytes, found the way a reader finds them.

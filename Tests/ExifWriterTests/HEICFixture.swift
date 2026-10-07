@@ -27,6 +27,8 @@ struct HEICFixture {
     var largeData = false
     /// Leave the EXIF item out altogether.
     var noExif = false
+    /// The XMP packet, which is the third item and lies last.
+    var packet: [UInt8] = HEICFixture.notes
 
     static let picture: [UInt8] = (0..<180).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ 1) }
     static let notes: [UInt8] = [UInt8]("<x:xmpmeta>a packet that must come through as it was</x:xmpmeta>".utf8)
@@ -46,7 +48,7 @@ struct HEICFixture {
         brands += [UInt8]("mif1heic".utf8)
         let ftyp = box("ftyp", brands)
         // The items in the order they lie in the data box.
-        var lying: [(id: Int, bytes: [UInt8])] = [(1, Self.picture), (3, Self.notes)]
+        var lying: [(id: Int, bytes: [UInt8])] = [(1, Self.picture), (3, packet)]
         if !noExif { lying.insert((2, payload), at: exifLast ? 2 : 0) }
 
         func meta(_ dataStart: Int) -> [UInt8] {
@@ -121,6 +123,8 @@ struct HEICFixture {
         body += [0, 0]
         body += [UInt8](type.utf8)
         body += [0]
+        // An item of this type says what it holds.
+        if type == "mime" { body += [UInt8]("application/rdf+xml".utf8) + [0] }
         return box("infe", body)
     }
 

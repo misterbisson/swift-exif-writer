@@ -20,6 +20,17 @@ try ExifGPS.setPosition(bixby, inFileAt: other, as: .png)
 try ExifGPS.setPosition(bixby, inFileAt: phone, as: .heic)
 ```
 
+And, in a TIFF, the text its EXIF states: what made the picture, through
+what lens, and when.
+
+```swift
+try ExifText.set([.model: "Nikon FE2", .dateTimeOriginal: "2019:07:04 22:30:00",
+                  .offsetTimeOriginal: "+02:00"],
+                 removing: [.make], inFileAt: url, as: .tiff)
+
+try ExifText.text(of: .model, inFileAt: url, as: .tiff)   // "Nikon FE2", or nil
+```
+
 ## Why
 
 Apple's `CGImageDestinationCopyImageSource` rewrites a file's metadata
@@ -151,7 +162,65 @@ cut out.
   just written a PNG through ImageIO and has no position to set. It gives
   the file no EXIF it did not have.
 
+## Text
+
+`ExifText` sets and takes out the text tags of a TIFF's first directory and
+of the EXIF directory it points at: `Make`, `Model`, `Software`,
+`DateTimeOriginal`, `DateTimeDigitized`, the three offsets from UTC,
+`LensMake`, `LensModel` and a few more (`ExifTag`).
+
+**Why.** The same copy of ImageIO's that leaves a TIFF's GPS block alone
+does not write the rest of what it was handed either. Measured on macOS
+27.0.1, on a TIFF stating nothing and one stating a different value for
+each tag, with the call returning true both times:
+
+| Tag | File states none | File states another value |
+| --- | --- | --- |
+| `Orientation`, `DateTimeOriginal` | written | replaced |
+| `Model`, `DateTimeDigitized`, `LensModel` | written | old value kept |
+| `OffsetTimeOriginal` | not written | removed |
+| `Make`, asked to be taken out | | kept |
+
+So a caller that copies a TIFF through ImageIO sets these right afterwards,
+with the position.
+
+**The list is closed.** A caller cannot name a tag by its number. The same
+directories hold the tags that say where the picture's data is, and a
+caller that could take any tag out could take those.
+
+**How**, by the rules the position follows:
+
+- A value no longer than the one it replaces is written where that one
+  lies. A date is always the same length, so changing one changes those
+  bytes and nothing else. Not where another tag keeps its value in the
+  same bytes, which would change both.
+- A longer value goes at the end, and the eight bytes of its entry that
+  say how long it is and where are changed.
+- A tag the directory did not have makes it one entry longer, so the
+  directory is written again at the end and the four bytes that point at
+  it are changed. A file with no EXIF directory gets one, which says its
+  version and nothing else.
+- A tag taken out makes the directory shorter where it stands.
+- **A GPS block that was the last thing in the file still is.** It is
+  moved along and what is new is written before it, so the next position
+  still does not grow the file.
+
+Text is written as UTF-8, which is what ExifTool and ImageIO write and
+read.
+
 ## Limits
+
+- **Text is written for a TIFF and not for a PNG or a HEIC**, which are
+  refused. Their EXIF is the same structure inside a chunk or an item.
+- **Text is written to the EXIF alone.** A packet can state the same thing
+  a second time, as `tiff:Model` or `exif:DateTimeOriginal`, and for text
+  the packet is not read and not changed. A file whose packet states it
+  comes out saying two things unless whatever writes the packet keeps it in
+  step. This is not what the library does for a position.
+- **A new EXIF directory states its version and nothing else.** ExifTool
+  starts one with `FlashpixVersion` and a `ColorSpace` of uncalibrated,
+  and its validation asks for both. The second is a statement about the
+  picture's colour that nobody made.
 
 - **A packet that cannot be read is a reason to refuse the file**, because
   what it states is then not known, and writing the EXIF alone could leave
@@ -219,6 +288,15 @@ one converted from a camera's JPEG.
 CI runs all of it on macOS and the first two on Linux, and fails if
 ExifTool is missing.
 
+- **The text**, the same three ways: on hand-built TIFFs in both byte
+  orders, where only the bytes that should change do; against ExifTool
+  both ways round, with every other tag, the position and the digest of
+  the picture as they were; and against ImageIO, on TIFFs it wrote, of 8
+  and 16 bits, compressed, and of two pages. One test is the use this was
+  written for: ImageIO's copy is handed a camera, a lens and a time, the
+  text and the position are set in the file it wrote, and ImageIO reads
+  every one, the same picture, and the packet the copy wrote.
+
 ### On your own photographs
 
 A repository cannot hold your photographs, so there is a test that takes
@@ -230,6 +308,12 @@ EXIF_WRITER_REAL_FILES=/path/to/a/folder swift test --filter RealFileTests
 
 Each file is copied to the temporary directory and only the copy is
 touched. Needs ExifTool.
+
+The text tags have a test of the same kind, for the TIFFs in the folder:
+
+```sh
+EXIF_WRITER_REAL_FILES=/path/to/a/folder swift test --filter RealFileTests/testTextOnTIFFsOfYourOwn
+```
 
 To learn only which files would be refused, and why, there is a quicker
 one that writes nothing and needs no ExifTool:

@@ -166,6 +166,19 @@ enum GPSBlock {
         return plan
     }
 
+    /// **The smallest structure a position can be written into**: a header
+    /// and a first directory that holds one thing, a pointer to a block
+    /// just past its own end, where `plan` then writes one. For a file that
+    /// has no EXIF at all.
+    ///
+    /// Big-endian, which is what ExifTool writes when it starts EXIF afresh.
+    static func seed() -> [UInt8] {
+        [0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08,
+         0x00, 0x01,
+         0x88, 0x25, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1A,
+         0x00, 0x00, 0x00, 0x00]
+    }
+
     /// Puts a value after the block's directory and points its entry at it.
     private static func put(_ bytes: [UInt8], for tag: UInt16, in entries: inout [Entry],
                               values: inout [UInt8], cursor: inout Int, tiff: TIFFStructure) throws {

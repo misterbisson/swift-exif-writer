@@ -11,7 +11,8 @@ import Foundation
 /// keyword is `XML:com.adobe.xmp`.
 ///
 /// Every chunk but those two is carried across as the bytes it was, and the
-/// packet's chunk is too unless the packet states a position.
+/// packet's chunk is too unless the packet states a position or something
+/// follows the packet in it.
 enum PNGFile {
     static let signature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
     private static let exif = [UInt8]("eXIf".utf8)
@@ -99,12 +100,20 @@ enum PNGFile {
         return nil
     }
 
-    /// The same PNG with its packet's position changed. Nil where there is
-    /// no packet, or it states no position, or it already states this one.
+    /// The same PNG with its packet's position changed, and with what
+    /// follows the packet in its chunk cut off. Nil where there is no
+    /// packet, or neither changes anything.
+    ///
+    /// **What follows the packet goes on any write**, whether or not the
+    /// packet states a position. ImageIO leaves the end of an older packet
+    /// there (`XMPPacket.trimmed`), and that can be a position the file no
+    /// longer states.
     private static func settingPacket(_ position: GPSPosition?, in bytes: [UInt8]) throws -> [UInt8]? {
         guard let packet = try packet(in: bytes, try chunks(bytes)) else { return nil }
         let old = Array(bytes[packet.text])
-        guard let new = try XMPPacket.setting(position, in: old), new != old else { return nil }
+        let set = try XMPPacket.setting(position, in: old) ?? old
+        let new = try XMPPacket.trimmed(set) ?? set
+        guard new != old else { return nil }
         let written = chunk(text, Array(bytes[packet.chunk.data.lowerBound..<packet.text.lowerBound]) + new)
         return Array(bytes[..<packet.chunk.start]) + written + Array(bytes[packet.chunk.end...])
     }

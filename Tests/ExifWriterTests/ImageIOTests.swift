@@ -372,6 +372,51 @@ final class ImageIOTests: XCTestCase {
         }
     }
 
+    /// **What ImageIO leaves after a PNG's packet is gone once the file is
+    /// written.** Measured on macOS 27.0.1: its copy of a PNG, with a rating
+    /// merged in, writes a shorter packet into a chunk of the old length,
+    /// and the end of the old packet stays after the closing line, where
+    /// ExifTool reads tags out of it. That it does so is not asserted, since
+    /// it is a fault and may be mended: where nothing is left, there is
+    /// nothing to try.
+    func testWhatImageIOLeavesAfterAPNGsPacketIsCut() throws {
+        func left(_ url: URL) throws -> [UInt8] {
+            let packet = try XCTUnwrap(try Read.packet(png: [UInt8](try Data(contentsOf: url))))
+            return Array(packet.dropFirst(try XMPPacket.trimmed(packet)?.count ?? packet.count))
+        }
+        func rating(_ url: URL) throws -> String? {
+            let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+            return CGImageSourceCopyMetadataAtIndex(source, 0, nil).flatMap {
+                CGImageMetadataCopyStringValueWithPath($0, nil, "xmp:Rating" as CFString) as String?
+            }
+        }
+        var tried = 0
+        for kind in kinds where kind.container == .png && !kind.bare {
+            for place in [bixby, nil] {
+                let copy = try copied(try file(kind), kind)
+                guard !(try left(copy.url)).isEmpty else { continue }
+                tried += 1
+                let message = "\(kind.name), \(place == nil ? "taken out" : "set")"
+                let before = try see(copy.url)
+                if ExifTool.path != nil {
+                    XCTAssertTrue(try ExifTool.faults(copy.url).contains { $0.contains("out of scope") },
+                                  "ExifTool no longer reads what was left: \(message)")
+                }
+                XCTAssertTrue(try ExifGPS.setPosition(place, inFileAt: copy.url, as: .png), message)
+                XCTAssertEqual(try left(copy.url), [], message)
+                let after = try see(copy.url)
+                XCTAssertEqual(after.pixels, before.pixels, message)
+                XCTAssertEqual(after.rest, before.rest, message)
+                XCTAssertEqual(try rating(copy.url), "4", "ImageIO no longer reads the packet: \(message)")
+                if let place { assertSame(after.position, place, message) } else { XCTAssertNil(after.position, message) }
+                if ExifTool.path != nil {
+                    XCTAssertFalse(try ExifTool.faults(copy.url).contains { $0.contains("out of scope") }, message)
+                }
+            }
+        }
+        try XCTSkipIf(tried == 0, "ImageIO left nothing after a PNG's packet on this system")
+    }
+
     /// The file copied by ImageIO with a rating merged into its metadata,
     /// which is how an app writes one without re-encoding.
     private func copied(_ scratch: Scratch, _ kind: Kind) throws -> Scratch {

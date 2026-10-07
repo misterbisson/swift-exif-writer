@@ -107,6 +107,36 @@ final class ExifToolTests: XCTestCase {
         }
     }
 
+    /// **A position that is only in what follows a PNG's packet goes when
+    /// the file is written.** ImageIO leaves the end of an older packet
+    /// after the closing line, ExifTool reads tags out of it, and here that
+    /// end is a whole position. Taken out, the file states none anywhere.
+    func testAPositionLeftAfterAPNGsPacketIsGone() throws {
+        let residue = [UInt8]("""
+              <exif:GPSLatitude>36,36.366660N</exif:GPSLatitude>
+                 <exif:GPSLongitude>118,3.766680W</exif:GPSLongitude>
+              </rdf:Description>
+           </rdf:RDF>
+        </x:xmpmeta>
+        <?xpacket end="r"?>
+        """.utf8)
+        for style in [XMPFixture.Style.lightroom, .exifTool] {
+            let packet = XMPFixture(style: style).stating(nil).bytes() + residue
+            for place in [nil, sydney] {
+                let file = try Scratch(PNGFixture(packet: packet).bytes(), extension: "png")
+                XCTAssertNil(try ExifGPS.position(inFileAt: file.url, as: .png), "\(style)")
+                let stale = try ExifTool.packetPosition(file.url)
+                XCTAssertEqual(stale?.latitude ?? .nan, 36.606111, accuracy: 1e-6,
+                               "ExifTool does not read what follows the packet: \(style)")
+                try ExifGPS.setPosition(place, inFileAt: file.url, as: .png)
+                XCTAssertNil(try ExifTool.packetPosition(file.url), "\(style)")
+                let block = try ExifTool.blockPosition(file.url)
+                XCTAssertEqual(block?.latitude, place?.latitude, "\(style)")
+                XCTAssertFalse(try ExifTool.faults(file.url).contains { $0.contains("out of scope") }, "\(style)")
+            }
+        }
+    }
+
     // MARK: - This library reads what ExifTool wrote
 
     func testThisReadsThePositionExifToolWrote() throws {

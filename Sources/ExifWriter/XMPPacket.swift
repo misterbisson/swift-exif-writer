@@ -148,6 +148,27 @@ enum XMPPacket {
             + (degrees < 0 ? negative : positive)
     }
 
+    // MARK: What follows the packet
+
+    /// **The packet without what follows its closing instruction**, or nil
+    /// where nothing follows it but white space, or it has no closing
+    /// instruction to end at.
+    ///
+    /// When ImageIO copies a PNG and the packet comes out shorter, it keeps
+    /// the chunk's length and leaves the end of the old packet after the
+    /// new one's closing line. Those bytes are text, not padding: tags the
+    /// file stated before, and ExifTool reads them. They are not the
+    /// packet, so a file that is written does not keep them.
+    static func trimmed(_ packet: [UInt8]) throws -> [UInt8]? {
+        var scanner = Scanner(packet)
+        try scanner.run()
+        guard let closing = scanner.closing,
+              let mark = packet[closing...].firstIndex(of: 0x3E), packet[mark - 1] == 0x3F else { return nil }
+        let end = mark + 1
+        guard !packet[end...].allSatisfy(isSpace) else { return nil }
+        return Array(packet[..<end])
+    }
+
     // MARK: Keeping a length
 
     /// **The packet at exactly `length` bytes**, by adding to its padding
@@ -213,6 +234,8 @@ enum XMPPacket {
         let bytes: [UInt8]
         var stack: [Open] = []
         var found: [Statement] = []
+        /// Where the packet's closing instruction starts, where it has one.
+        var closing: Int?
 
         init(_ bytes: [UInt8]) { self.bytes = bytes }
 
@@ -230,7 +253,9 @@ enum XMPPacket {
                     // ImageIO copies a PNG and the packet comes out
                     // shorter, it keeps the chunk's length and leaves the
                     // tail of the old packet after this line. That tail is
-                    // not XML. It is carried through and not read.
+                    // not XML. It is not read, and a PNG's is cut off when the
+                    // file is written (`trimmed`).
+                    closing = open
                     break
                 } else if has("<?", open) {
                     at = try end(of: "?>", from: open + 2)

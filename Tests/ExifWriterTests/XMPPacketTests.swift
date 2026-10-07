@@ -168,6 +168,26 @@ final class XMPPacketTests: XCTestCase {
         }
     }
 
+    /// **What follows the closing line can be cut off**, which a PNG's is
+    /// when the file is written. White space alone is not worth a change,
+    /// and a packet with no closing line has no end to cut at.
+    func testWhatFollowsTheClosingLineIsCut() throws {
+        let residue = "/exifEX:LensModel>\n      </rdf:Description>\n   </rdf:RDF>\n</x:xmpmeta>\n"
+        for style in [XMPFixture.Style.lightroom, .exifTool] {
+            let text = XMPFixture(style: style).text()
+            XCTAssertTrue(text.hasSuffix("?>"), "the fixture ends at its closing line: \(style)")
+            XCTAssertEqual(said(try XMPPacket.trimmed([UInt8]((text + residue).utf8))), text, "\(style)")
+            // The end of an older packet has a closing line of its own.
+            XCTAssertEqual(said(try XMPPacket.trimmed([UInt8]((text + residue + "<?xpacket end=\"r\"?>").utf8))),
+                           text, "\(style)")
+            XCTAssertEqual(said(try XMPPacket.trimmed([UInt8]((text + "\u{0}").utf8))), text, "\(style)")
+            XCTAssertNil(try XMPPacket.trimmed([UInt8](text.utf8)), "\(style)")
+            XCTAssertNil(try XMPPacket.trimmed([UInt8]((text + "\n  \r\n\t").utf8)), "\(style)")
+        }
+        XCTAssertNil(try XMPPacket.trimmed(XMPFixture(style: .imageIO).bytes()), "no closing line")
+        XCTAssertThrowsError(try XMPPacket.trimmed([UInt8]("<x:xmpmeta><rdf:RDF>".utf8)))
+    }
+
     func testWhatCannotBeReadIsRefused() {
         var wide: [UInt8] = [0xFF, 0xFE]
         for byte in XMPFixture().bytes() { wide += [byte, 0] }

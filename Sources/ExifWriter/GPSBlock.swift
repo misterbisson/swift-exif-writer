@@ -74,15 +74,15 @@ enum GPSBlock {
     ///
     /// An empty plan means there is nothing to do: taking a position out of
     /// a structure that has none.
-    static func plan(_ store: ByteStore, setting place: GPSPosition?) throws -> Plan {
+    static func plan(_ store: ByteStore, setting place: GPSPosition?) throws -> ByteEdit {
         let tiff = try TIFFStructure(store)
         let root = try tiff.directory(at: tiff.first)
         let pointer = root.entries.firstIndex(where: isPointer)
         let old = block(in: tiff, under: root)
         let had = old?.entries.contains { position.contains($0.tag) } ?? false
-        guard place != nil || had else { return Plan() }
+        guard place != nil || had else { return ByteEdit() }
 
-        var plan = Plan()
+        var plan = ByteEdit()
         var end = store.count
         var carried: [(tag: UInt16, bytes: [UInt8])] = []
         if let old, let values = try tail(of: old, in: tiff) {
@@ -99,7 +99,7 @@ enum GPSBlock {
         if place == nil, !entries.contains(where: { $0.tag != version }), let pointer {
             var rest = root.entries
             rest.remove(at: pointer)
-            guard !rest.isEmpty else { return Plan(leavesNothing: true) }
+            guard !rest.isEmpty else { return ByteEdit(leavesNothing: true) }
             plan.patches.append(.init(offset: root.offset,
                                       bytes: tiff.bytes(of: rest, next: root.next) + [UInt8](repeating: 0, count: 12)))
             return plan

@@ -47,7 +47,7 @@ final class FileStore: ByteStore {
 /// The order matters to a file edited in place. What is new is written at
 /// the end first, and the few bytes that point at it are changed last, so a
 /// write that is interrupted leaves the old structure standing.
-struct Plan: Equatable {
+struct ByteEdit: Equatable {
     struct Patch: Equatable {
         var offset: Int
         var bytes: [UInt8]

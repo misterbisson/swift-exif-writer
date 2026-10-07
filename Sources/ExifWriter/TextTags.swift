@@ -12,9 +12,17 @@ import Foundation
 ///
 /// - **A value that fits where the old one lies is written there.** A date
 ///   is always the same length, so changing one changes those bytes and
-///   nothing else. Not where another tag in the directories read keeps its
-///   value in the same bytes: then the two were one value, and writing over
-///   it would change both.
+///   nothing else. Not where another directory that can be found
+///   (`TIFFStructure.reachable`) keeps a value in the same bytes: then the
+///   two were one value, and writing over it would change both. And not
+///   where a pointer led somewhere no directory could be read, because then
+///   nobody knows what else is using the bytes.
+/// - **A shorter value keeps the room the longer one had.** It is written
+///   with zeros after it and the entry goes on saying the old length, which
+///   is how a camera pads a name. So the longer value fits again when it
+///   comes back, and changing a name back and forth costs what changing it
+///   once did. Shortening the length would give the room up, and nothing
+///   in the file would say it was free.
 /// - **A longer value goes at the end**, and the eight bytes of its entry
 ///   that say how long it is and where are changed.
 /// - **A tag the directory did not have** makes the directory one entry
@@ -24,8 +32,19 @@ import Foundation
 ///   directory, the first directory's pointer for the EXIF one.
 /// - **A tag taken out** makes the directory shorter, so it is rewritten
 ///   where it stands and the room left over is zeroed.
+/// - **An EXIF directory left saying nothing goes**, by taking its pointer
+///   out of the first directory, as a GPS block goes and as ExifTool does
+///   it. Its version alone is nothing.
 ///
 /// What is replaced stays in the bytes, unreferenced.
+///
+/// ## What still grows the file
+///
+/// A directory has no way to keep room. One that lost a tag is shorter where
+/// it stands, and the next tag it gains sends a fresh copy of it to the end
+/// all the same, because nothing says the zeroed room after it is free. So
+/// adding a tag, taking it out and adding it again costs a directory's
+/// length each time round.
 ///
 /// ## A new EXIF directory says its version and nothing else
 ///
@@ -78,7 +97,8 @@ enum TextTags {
     /// of it.
     ///
     /// Text is written as UTF-8 with a zero after it, which is what
-    /// ExifTool and ImageIO write and read.
+    /// ExifTool and ImageIO write and read. Text the structure holds with
+    /// more zeros after it than one is the same text, and is left as it is.
     static func plan(_ store: ByteStore, setting text: [ExifTag: String],
                      removing: Set<ExifTag>) throws -> ByteEdit {
         for (tag, value) in text {
@@ -96,13 +116,15 @@ enum TextTags {
             throw ExifWriterError.malformed("an EXIF pointer that is not an offset")
         }
         let oldExif = exif(in: tiff, under: root)
-        let block = GPSBlock.directory(in: tiff, under: root)
 
-        // Where every value these directories keep outside themselves lies,
-        // and where the directories lie, so that nothing is written over
-        // bytes something else is using.
+        // Where every value a directory keeps outside itself lies, and where
+        // the directories lie, so that nothing is written over bytes
+        // something else is using. Every directory that can be found, and
+        // not only the two being changed: a second page can keep its
+        // camera's name in the first page's bytes.
+        let (all, whole) = tiff.reachable()
         var held: [(directory: Int, tag: UInt16?, range: Range<Int>)] = []
-        for directory in [root, oldExif, block].compactMap({ $0 }) {
+        for directory in all {
             held.append((directory.offset, nil, directory.offset..<directory.offset + directory.length))
             for entry in directory.entries where entry.isOutOfLine {
                 guard let size = entry.size else { continue }
@@ -110,8 +132,12 @@ enum TextTags {
                 held.append((directory.offset, entry.tag, at..<at + size))
             }
         }
+        /// Where a pointer led nowhere a directory could be read, there may
+        /// be one nobody found, and every value is taken to be in use.
         func usedByAnother(_ range: Range<Int>, than directory: Directory, _ tag: UInt16) -> Bool {
-            held.contains { $0.range.overlaps(range) && !($0.directory == directory.offset && $0.tag == tag) }
+            !whole || held.contains {
+                $0.range.overlaps(range) && !($0.directory == directory.offset && $0.tag == tag)
+            }
         }
 
         var plan = ByteEdit()
@@ -145,15 +171,19 @@ enum TextTags {
 
                 let was = entries[index]
                 let wasText = was.type == 2 ? try tiff.value(of: was) : nil
-                if wasText == bytes { continue }
-                if bytes.count <= 4 {
-                    entry.value = inline
-                } else if let old, wasText != nil, was.isOutOfLine, let size = was.size, bytes.count <= size,
-                          case let at = Int(tiff.u32(was.value, 0)),
-                          !usedByAnother(at..<at + size, than: old, was.tag) {
+                // The same text as it is read, which is up to the first
+                // zero, however many follow it.
+                if let wasText, wasText.prefix(while: { $0 != 0 }).elementsEqual(value.utf8) { continue }
+                if let old, wasText != nil, was.isOutOfLine, let size = was.size, bytes.count <= size,
+                   case let at = Int(tiff.u32(was.value, 0)),
+                   !usedByAnother(at..<at + size, than: old, was.tag) {
                     plan.patches.append(.init(offset: at,
                                               bytes: bytes + [UInt8](repeating: 0, count: size - bytes.count)))
-                    entry.value = was.value
+                    // The entry is not changed: it goes on saying the length
+                    // the value had, and the room stays the value's.
+                    entry = was
+                } else if bytes.count <= 4 {
+                    entry.value = inline
                 } else {
                     pending.append(Pending(directory: which, tag: tag.number, bytes: bytes))
                 }
@@ -169,6 +199,12 @@ enum TextTags {
         if oldExif == nil, !exifEntries.isEmpty, !exifEntries.contains(where: { $0.tag == exifVersion }) {
             exifEntries.insert(Entry(tag: exifVersion, type: 7, count: 4, value: Array("0232".utf8)), at: 0)
         }
+        // Taken out, and nothing else in the directory says anything: the
+        // directory goes, by taking its pointer out of the first directory.
+        let exifGoes = oldExif.map { old in
+            exifEntries.count < old.entries.count && !exifEntries.contains { $0.tag != exifVersion }
+        } ?? false
+        if exifGoes { image.removeAll(where: isPointer) }
         guard !image.isEmpty else {
             throw ExifWriterError.malformed("a TIFF whose first directory would hold nothing")
         }
@@ -215,7 +251,7 @@ enum TextTags {
             let at = end()
             append += tiff.bytes(of: exifEntries, next: oldExif?.next ?? 0)
             try point(exifPointer, in: &image, at: at)
-        } else if let oldExif {
+        } else if let oldExif, !exifGoes {
             plan.patches += try differing(oldExif, from: exifEntries, in: tiff)
         }
 

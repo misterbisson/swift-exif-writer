@@ -72,11 +72,19 @@ public struct ExifTag: Hashable, Sendable, CustomStringConvertible {
 ///
 /// Apple's `CGImageDestinationCopyImageSource` rewrites a file's metadata
 /// without re-encoding it, and in a TIFF it does not write what it was
-/// handed. Measured on macOS 27.0.1: a `Model`, a `LensModel` or a
-/// `DateTimeDigitized` the file already states is left as it was, an
-/// `OffsetTimeOriginal` is not written and one that was there is removed,
-/// and a `Make` asked to be taken out stays. The call returns true. This is
-/// for setting those right afterwards.
+/// handed. Measured on macOS 27.0.1, reading the directories with ExifTool:
+/// a `Model`, a `LensModel` or a `DateTimeDigitized` the file already states
+/// is left as it was, a `DateTimeOriginal` or an `OffsetTimeOriginal` is not
+/// written and one that was there is removed, and a `Make` asked to be taken
+/// out stays. The call returns true. This is for setting those right
+/// afterwards.
+///
+/// **Set every tag that is meant, and not only the ones a table calls
+/// wrong.** What the copy does is Apple's to change, and setting a tag that
+/// already holds the value costs nothing. And do not ask ImageIO what the
+/// copy left: reading a TIFF, it gives a date the EXIF lacks out of the XMP
+/// packet, so both dates look written when neither is. `text(of:)` reads
+/// the directory.
 ///
 /// ## Only a TIFF, and only its EXIF
 ///
@@ -92,12 +100,12 @@ public struct ExifTag: Hashable, Sendable, CustomStringConvertible {
 /// ## What moves
 ///
 /// Nothing that is there, as with a position. A value no longer than the
-/// one it replaces is written where that one lies. A longer one, or one for
-/// a tag the file did not have, goes at the end, and the few bytes that
-/// point at it change last. What it replaces stays in the bytes,
-/// unreferenced. A GPS block that was the last thing in the file is moved
-/// along so it still is, and a later position write still does not grow the
-/// file.
+/// one it replaces is written where that one lies, and keeps the room the
+/// longer one had. A longer one, or one for a tag the file did not have,
+/// goes at the end, and the few bytes that point at it change last. What it
+/// replaces stays in the bytes, unreferenced. A GPS block that was the last
+/// thing in the file is moved along so it still is, and a later position
+/// write still does not grow the file.
 public enum ExifText {
 
     /// The text the file's EXIF holds under `tag`, or nil where it has none
@@ -124,6 +132,12 @@ public enum ExifText {
     /// **The file is edited where it stands.** What is new is written at
     /// the end first and the bytes that point at it last. A caller that
     /// needs all or nothing writes into a copy and moves it into place.
+    ///
+    /// **What a write cut short can cost is the position, which the call
+    /// was not about.** Where a GPS block is the last thing in the file and
+    /// something new has to go at the end, the block is cut off first and
+    /// written again after what is new. Until that is done the first
+    /// directory points at bytes that are not a block.
     @discardableResult
     public static func set(_ text: [ExifTag: String], removing: Set<ExifTag> = [],
                            inFileAt url: URL, as container: ImageContainer) throws -> Bool {

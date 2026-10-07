@@ -20,6 +20,14 @@ struct Fixture {
     var blockLast = false
     /// An XMP packet for the first directory to point at.
     var packet: [UInt8]?
+    /// Text the first directory states, by tag: a scanner's make and model.
+    var text: [UInt16: String] = [:]
+    /// An EXIF directory for the first to point at, and the text it states.
+    /// Nil for a file with none.
+    var exif: [UInt16: String]?
+    /// Keep every tag in `text` in the same bytes, as one value that more
+    /// than one entry points at. They have to hold the same text.
+    var textShared = false
     var width = 6
     var height = 5
 
@@ -38,6 +46,35 @@ struct Fixture {
             if out.count % 2 == 1 { out.append(0) }
         }
 
+        /// Text as an entry holds it: in its four bytes where it fits, and
+        /// otherwise written here with the entry pointing at it.
+        func textEntry(_ tag: UInt16, _ string: String, sharing: UInt32? = nil) -> (UInt32?, [UInt8]) {
+            let bytes = Array(string.utf8) + [0]
+            if bytes.count <= 4 {
+                return (nil, entry(tag, 2, UInt32(bytes.count), bytes + [UInt8](repeating: 0, count: 4 - bytes.count)))
+            }
+            if let sharing { return (sharing, entry(tag, 2, UInt32(bytes.count), u32(sharing))) }
+            let at = UInt32(out.count)
+            out += bytes
+            if out.count % 2 == 1 { out.append(0) }
+            return (at, entry(tag, 2, UInt32(bytes.count), u32(at)))
+        }
+
+        var textEntries: [[UInt8]] = []
+        var shared: UInt32?
+        for (tag, string) in text.sorted(by: { $0.key < $1.key }) {
+            let (at, bytes) = textEntry(tag, string, sharing: textShared ? shared : nil)
+            if textShared, shared == nil { shared = at }
+            textEntries.append(bytes)
+        }
+
+        var exifOffset: UInt32?
+        if let exif {
+            let held = exif.sorted { $0.key < $1.key }.map { textEntry($0.key, $0.value).1 }
+            exifOffset = UInt32(out.count)
+            out += u16(UInt16(held.count)) + held.flatMap { $0 } + u32(0)
+        }
+
         var blockOffset: UInt32?
         if block != .none, !blockLast { blockOffset = UInt32(out.count); out += gpsBlock(at: out.count) }
 
@@ -46,13 +83,16 @@ struct Fixture {
             entry(258, 3, 1, short(8)), entry(259, 3, 1, short(1)), entry(262, 3, 1, short(1)),
             entry(273, 4, 1, u32(UInt32(strip))), entry(277, 3, 1, short(1)),
             entry(278, 3, 1, short(UInt16(height))), entry(279, 4, 1, u32(UInt32(width * height))),
-        ]
+        ] + textEntries
         if let packet { entries.append(entry(700, 1, UInt32(packet.count), u32(UInt32(packetOffset)))) }
+        if let exifOffset { entries.append(entry(0x8769, 4, 1, u32(exifOffset))) }
         let root = out.count
         let rootLength = 2 + 12 * (entries.count + (block == .none ? 0 : 1)) + 4
         if block != .none {
             entries.append(entry(0x8825, 4, 1, u32(blockOffset ?? UInt32(root + rootLength))))
         }
+        // A directory's entries are in the order of their tags.
+        entries.sort { tag(of: $0) < tag(of: $1) }
         out += u16(UInt16(entries.count)) + entries.flatMap { $0 } + u32(0)
         if block != .none, blockLast { out += gpsBlock(at: out.count) }
         out.replaceSubrange(4..<8, with: u32(UInt32(root)))
@@ -89,6 +129,10 @@ struct Fixture {
         entries.append(entry(6, 5, 1, u32(UInt32(valuesAt + values.count))))
         values += u32(UInt32((altitude * 100).rounded())) + u32(100)
         return u16(UInt16(entries.count)) + entries.flatMap { $0 } + u32(0) + values
+    }
+
+    private func tag(of entry: [UInt8]) -> UInt16 {
+        little ? UInt16(entry[0]) | UInt16(entry[1]) << 8 : UInt16(entry[0]) << 8 | UInt16(entry[1])
     }
 
     private func entry(_ tag: UInt16, _ type: UInt16, _ count: UInt32, _ value: [UInt8]) -> [UInt8] {
@@ -130,6 +174,20 @@ enum Read {
         let root = try tiff.directory(at: tiff.first)
         guard let entry = root.entry(TIFFStructure.xmpPacket), let held = try tiff.value(of: entry) else { return nil }
         return (Int(tiff.u32(entry.value, 0)), held)
+    }
+
+    /// The EXIF directory the first directory points at.
+    static func exifDirectory(_ bytes: [UInt8]) throws -> TIFFStructure.Directory? {
+        let tiff = try TIFFStructure(ArrayStore(bytes: bytes))
+        let root = try tiff.directory(at: tiff.first)
+        guard let pointer = root.entry(0x8769) else { return nil }
+        return try tiff.directory(at: Int(tiff.u32(pointer.value, 0)))
+    }
+
+    /// The first directory.
+    static func firstDirectory(_ bytes: [UInt8]) throws -> TIFFStructure.Directory {
+        let tiff = try TIFFStructure(ArrayStore(bytes: bytes))
+        return try tiff.directory(at: tiff.first)
     }
 
     /// The picture's own bytes, found the way a reader finds them.

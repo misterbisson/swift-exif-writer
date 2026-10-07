@@ -231,6 +231,23 @@ enum GPSBlock {
         return try? tiff.directory(at: at)
     }
 
+    /// **The block, where it is the last thing in the store**, and nil
+    /// where there is none or something follows it.
+    ///
+    /// For a write that has something else to put at the end
+    /// (`TextTags`). It moves this block along and writes before it, so
+    /// the block is still last and the next position still costs nothing.
+    static func trailing(in tiff: TIFFStructure, under root: TIFFStructure.Directory) throws
+        -> TIFFStructure.Directory? {
+        guard let found = block(in: tiff, under: root), try tail(of: found, in: tiff) != nil else { return nil }
+        return found
+    }
+
+    /// The block's directory, wherever it lies.
+    static func directory(in tiff: TIFFStructure, under root: TIFFStructure.Directory) -> TIFFStructure.Directory? {
+        block(in: tiff, under: root)
+    }
+
     /// **Whether the block is the last thing in the store**: its directory,
     /// then its values end to end, then nothing. Gives the values that lie
     /// in that stretch, which a write that cuts the block off has to carry

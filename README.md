@@ -367,10 +367,14 @@ EXIF_WRITER_REAL_FILES=/path/to/a/folder swift test --filter RealFileTests/testT
 ```
 
 What the author's own scans did not cover: all 230 TIFFs already had an
-EXIF directory, none had a GPS block as its last thing, and none had a
-second page. So a file with no EXIF directory getting one, and the block
-staying last, have met built files and files ImageIO wrote, and no real
-scan.
+EXIF directory, none arrived with a GPS block as its last thing, and none
+had a second page. So a file with no EXIF directory getting one has met
+built files and files ImageIO wrote, and no real scan.
+
+The block staying last has met real scans, on a block this library wrote.
+The test sets a position in each copy and then a longer name, and checks
+that the next position does not grow the file. A last block some other
+writer made has met no real file.
 
 To learn only which files would be refused, and why, there is a quicker
 one that writes nothing and needs no ExifTool:

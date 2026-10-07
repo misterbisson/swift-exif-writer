@@ -109,10 +109,24 @@ enum PNGFile {
     /// there (`XMPPacket.trimmed`), and that can be a position the file no
     /// longer states.
     private static func settingPacket(_ position: GPSPosition?, in bytes: [UInt8]) throws -> [UInt8]? {
+        try rewritingPacket(in: bytes) { old in
+            let set = try XMPPacket.setting(position, in: old) ?? old
+            return try XMPPacket.trimmed(set) ?? set
+        }
+    }
+
+    /// The same PNG with what follows its packet cut off and nothing else
+    /// changed. Nil where there is no packet, or nothing follows it.
+    static func trimmed(_ bytes: [UInt8]) throws -> [UInt8]? {
+        try rewritingPacket(in: bytes) { try XMPPacket.trimmed($0) ?? $0 }
+    }
+
+    /// The PNG with its packet replaced by what `change` makes of it. Nil
+    /// where there is no packet or `change` leaves it as it was.
+    private static func rewritingPacket(in bytes: [UInt8], _ change: ([UInt8]) throws -> [UInt8]) throws -> [UInt8]? {
         guard let packet = try packet(in: bytes, try chunks(bytes)) else { return nil }
         let old = Array(bytes[packet.text])
-        let set = try XMPPacket.setting(position, in: old) ?? old
-        let new = try XMPPacket.trimmed(set) ?? set
+        let new = try change(old)
         guard new != old else { return nil }
         let written = chunk(text, Array(bytes[packet.chunk.data.lowerBound..<packet.text.lowerBound]) + new)
         return Array(bytes[..<packet.chunk.start]) + written + Array(bytes[packet.chunk.end...])

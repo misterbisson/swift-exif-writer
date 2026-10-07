@@ -305,6 +305,35 @@ final class XMPInFilesTests: XCTestCase {
         }
     }
 
+    /// **What follows the packet can be cut off without setting anything**,
+    /// for a save that was not about the position. Nothing else in the file
+    /// changes: a PNG with its position only in its packet is given no
+    /// EXIF, as `setPosition` would give it.
+    func testWhatFollowsAPNGsPacketCanBeCutAlone() throws {
+        let residue = [UInt8]("/exifEX:LensModel>\n      </rdf:Description>\n   </rdf:RDF>\n</x:xmpmeta>\n".utf8)
+        for style in [XMPFixture.Style.lightroom, .exifTool] {
+            let packet = XMPFixture(style: style)
+            let clean = PNGFixture(packet: packet.bytes()).bytes()
+            let scratch = try Scratch(PNGFixture(packet: packet.bytes() + residue).bytes(), extension: "png")
+            XCTAssertTrue(try ExifGPS.cutWhatFollowsThePacket(inFileAt: scratch.url, as: .png), "\(style)")
+            XCTAssertEqual([UInt8](try Data(contentsOf: scratch.url)), clean, "\(style)")
+            XCTAssertFalse(try ExifGPS.cutWhatFollowsThePacket(inFileAt: scratch.url, as: .png), "\(style)")
+            let stated = try ExifGPS.positions(inFileAt: scratch.url, as: .png)
+            XCTAssertNil(stated.exif, "\(style)")
+            assertSame(stated.xmp, whitney, "\(style)")
+        }
+        // No packet, and the other two kinds of file: nothing to do.
+        let bare = PNGFixture().bytes()
+        XCTAssertEqual([UInt8](try ExifGPS.cuttingWhatFollowsThePacket(in: Data(bare), as: .png)), bare)
+        let packet = XMPFixture(style: .exifTool).bytes() + residue
+        for (container, bytes) in [
+            (ImageContainer.tiff, Fixture(block: camera, packet: packet).bytes()),
+            (.heic, HEICFixture(exif: Fixture(block: camera).bytes(), packet: packet).bytes()),
+        ] {
+            XCTAssertEqual([UInt8](try ExifGPS.cuttingWhatFollowsThePacket(in: Data(bytes), as: container)), bytes)
+        }
+    }
+
     /// Only a PNG's. ImageIO has not been seen to leave anything after a
     /// TIFF's or a HEIC's packet, and theirs come through as they were.
     func testWhatFollowsATIFFsOrAHEICsPacketIsLeft() throws {

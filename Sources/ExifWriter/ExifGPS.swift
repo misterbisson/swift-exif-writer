@@ -29,7 +29,8 @@ public enum ImageContainer: Sendable, CaseIterable {
 /// second time in its XMP packet, and some state it only there. Setting a
 /// position writes the EXIF, and changes the packet's copy where the packet
 /// has one, so the two agree. A packet that states none is left as it was,
-/// and no packet is made.
+/// and no packet is made. What follows a PNG's packet in its chunk, which
+/// ImageIO can leave there, is cut off on any write.
 public enum ExifGPS {
 
     /// The position the file states, or nil where it states none: the
@@ -62,7 +63,8 @@ public enum ExifGPS {
     /// **Sets the file's position, or with nil takes it out**, in its EXIF
     /// and in its XMP packet where the packet states one. Returns whether
     /// the file was changed: taking a position out of a file that has none
-    /// changes nothing.
+    /// changes nothing, unless it is a PNG with something after its packet
+    /// to cut off.
     ///
     /// **A TIFF is edited where it stands.** What is new is written at the
     /// end first and the few bytes that point at it last, so an interrupted

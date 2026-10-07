@@ -59,7 +59,8 @@ position changes the packet's copy to agree, and taking one out takes it
 out of both.
 
 **A packet that states no position is left as the bytes it was**, and no
-packet is made for a file that has none. That is what ExifTool does: EXIF
+packet is made for a file that has none. The one exception is a PNG's
+packet with something after its closing line, which is cut off (below). That is what ExifTool does: EXIF
 is where a position belongs, and a second copy is kept in step only where
 somebody already put one.
 
@@ -98,7 +99,8 @@ copy and move it into place.
 
 **A PNG is written whole to a new file, which then takes its place.** Its
 EXIF chunk grows, or a new one goes in before the picture's data, and every
-other chunk is carried across as the bytes it was. A PNG that had no EXIF,
+other chunk is carried across as the bytes it was, but for the packet's
+where the packet changes. A PNG that had no EXIF,
 given a position and then relieved of it, is byte for byte the file it
 started as. EXIF found after the picture's data is moved before it, where
 the format asks for it and where ExifTool puts it.
@@ -137,9 +139,14 @@ cut out.
   stays in the bytes, unreferenced.
 - **The packet ends at its closing line**, `<?xpacket end=…?>`. When
   ImageIO copies a PNG and the packet comes out shorter, it keeps the
-  chunk's length and leaves the tail of the old packet after that line
-  (measured on macOS 27.0.1: 201 bytes of one). That tail is carried
-  through as it was and not read.
+  chunk's length and leaves the end of the old packet after that line
+  (measured on macOS 27.0.1: 201 bytes of one). Those bytes are text, tags
+  the file stated before, and ExifTool reads them. They are not read here.
+- **What follows a PNG's packet is cut off on any write**, whether or not
+  the packet states a position, and with nil too. It is not the packet, and
+  it can hold a position the file no longer states. White space alone is
+  left. So a call that finds no position to change can still change a PNG,
+  and says so by returning true.
 
 ## Limits
 
@@ -152,11 +159,10 @@ cut out.
 - **A position in a nested structure or under another namespace is not the
   file's position** and is left alone. So is one an app keeps under a
   namespace of its own.
-- **What lies after a packet's closing line is neither read nor changed.**
-  ExifTool does read whole tags out of those bytes, and warns that their
-  namespaces are out of scope. So a position that is stated only in what
-  ImageIO left there is one ExifTool may report and this library will not
-  touch.
+- **What lies after a TIFF's or a HEIC's packet is neither read nor
+  changed.** ImageIO has been seen to leave such bytes in a PNG only, and
+  only a PNG's are cut. ExifTool reads whole tags out of them, and warns
+  that their namespaces are out of scope.
 - **A PNG's packet in an old-style text chunk is not read.** Some tools
   have written XMP as a `tEXt` or `zTXt` "raw profile". Only the `iTXt`
   chunk the XMP specification names is.
@@ -172,8 +178,7 @@ cut out.
 - **BigTIFF is refused**, and so is a file that would pass 4 GB.
 - **It is a writer, not a scrubber.** A block that was replaced and was not
   the last thing in the file stays in the bytes, unreferenced. So does a
-  TIFF's packet that was moved, and whatever another writer left after a
-  packet's closing line. Do not use this to remove a location from a file
+  TIFF's packet that was moved. Do not use this to remove a location from a file
   you are about to publish.
 - A position is kept to a millionth of a second of arc. Apple's ImageIO
   gives any file's position back to a ten-thousandth of a minute, about

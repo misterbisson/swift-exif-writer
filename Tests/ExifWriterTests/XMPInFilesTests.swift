@@ -256,6 +256,69 @@ final class XMPInFilesTests: XCTestCase {
         }
     }
 
+    /// **What follows a PNG's packet is cut off on any write.** ImageIO
+    /// leaves the end of an older packet there when its copy comes out
+    /// shorter, and here that end holds a position the packet no longer
+    /// states.
+    func testWhatFollowsAPNGsPacketIsCutOnAnyWrite() throws {
+        let residue = [UInt8]("""
+              <exif:GPSLatitude>36,36.366660N</exif:GPSLatitude>
+                 <exif:GPSLongitude>118,3.766680W</exif:GPSLongitude>
+              </rdf:Description>
+           </rdf:RDF>
+        </x:xmpmeta>
+        <?xpacket end="r"?>
+        """.utf8)
+        for style in [XMPFixture.Style.lightroom, .exifTool] {
+            let stating = XMPFixture(style: style)
+            let silent = stating.stating(nil)
+            let camera = Fixture(block: self.camera).bytes()
+
+            // The packet states a position: it is changed, and the rest goes.
+            let placed = PNGFixture(packet: stating.bytes() + residue).bytes()
+            let moved = try set(sydney, placed, .png)
+            XCTAssertEqual(said(try Read.packet(png: moved)), stating.stating(sydney).text(), "\(style)")
+            XCTAssertEqual(try Read.chunksBesideMetadata(moved), try Read.chunksBesideMetadata(placed), "\(style)")
+            XCTAssertEqual(said(try Read.packet(png: try set(nil, placed, .png))), silent.text(), "\(style)")
+
+            // It states none: the packet is the bytes it was, without them.
+            let unplaced = PNGFixture(exif: .holding(camera), packet: silent.bytes() + residue).bytes()
+            for place in [sydney, nil] {
+                let after = try set(place, unplaced, .png)
+                XCTAssertEqual(said(try Read.packet(png: after)), silent.text(), "\(style)")
+                XCTAssertEqual(try Read.chunksBesideMetadata(after), try Read.chunksBesideMetadata(unplaced), "\(style)")
+            }
+
+            // No position anywhere, and still a change, once.
+            let bare = PNGFixture(packet: silent.bytes() + residue).bytes()
+            let scratch = try Scratch(bare, extension: "png")
+            XCTAssertTrue(try ExifGPS.setPosition(nil, inFileAt: scratch.url, as: .png), "\(style)")
+            let cut = [UInt8](try Data(contentsOf: scratch.url))
+            XCTAssertEqual(cut, PNGFixture(packet: silent.bytes()).bytes(), "\(style)")
+            XCTAssertFalse(try ExifGPS.setPosition(nil, inFileAt: scratch.url, as: .png), "\(style)")
+
+            // White space after the closing line is nothing to cut.
+            let spaced = PNGFixture(exif: .holding(camera), packet: silent.bytes() + [0x0A]).bytes()
+            XCTAssertEqual(try Read.packet(png: try set(sydney, spaced, .png)), silent.bytes() + [0x0A], "\(style)")
+            XCTAssertEqual(try set(nil, PNGFixture(packet: silent.bytes() + [0x0A]).bytes(), .png),
+                           PNGFixture(packet: silent.bytes() + [0x0A]).bytes(), "\(style)")
+        }
+    }
+
+    /// Only a PNG's. ImageIO has not been seen to leave anything after a
+    /// TIFF's or a HEIC's packet, and theirs come through as they were.
+    func testWhatFollowsATIFFsOrAHEICsPacketIsLeft() throws {
+        let residue = [UInt8]("\n   </rdf:RDF>\n</x:xmpmeta>\n".utf8)
+        let packet = XMPFixture(style: .exifTool).stating(nil).bytes() + residue
+        let camera = Fixture(block: self.camera).bytes()
+        for (name, container, before) in [
+            ("TIFF", ImageContainer.tiff, Fixture(block: self.camera, packet: packet).bytes()),
+            ("HEIC", .heic, HEICFixture(exif: camera, packet: packet).bytes()),
+        ] {
+            XCTAssertEqual(try self.packet(try set(sydney, before, container), container), packet, name)
+        }
+    }
+
     /// A packet that is compressed cannot be read, so what it states is not
     /// known, and the file is refused and not changed.
     func testAPNGWhosePacketIsCompressedIsRefused() throws {

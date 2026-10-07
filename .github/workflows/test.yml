@@ -1,0 +1,28 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install exiftool
+      - run: swift test
+        env:
+          # A run that could not ask ExifTool anything is a failure, not a
+          # pass with skips.
+          EXIFTOOL_REQUIRED: "1"
+
+  linux:
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y libimage-exiftool-perl
+      - run: swift test
+        env:
+          EXIFTOOL_REQUIRED: "1"

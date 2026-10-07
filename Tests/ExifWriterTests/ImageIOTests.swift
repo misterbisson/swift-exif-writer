@@ -414,6 +414,22 @@ final class ImageIOTests: XCTestCase {
                 }
             }
         }
+        // And cut off alone, for a save that was not about the position:
+        // the file says what it said, where it said it.
+        for kind in kinds where kind.container == .png && !kind.bare {
+            let copy = try copied(try file(kind), kind)
+            guard !(try left(copy.url)).isEmpty else { continue }
+            let before = try see(copy.url)
+            let stated = try ExifGPS.positions(inFileAt: copy.url, as: .png)
+            XCTAssertTrue(try ExifGPS.cutWhatFollowsThePacket(inFileAt: copy.url, as: .png), kind.name)
+            XCTAssertEqual(try left(copy.url), [], kind.name)
+            let after = try see(copy.url)
+            XCTAssertEqual(after.position, before.position, kind.name)
+            XCTAssertEqual(after.pixels, before.pixels, kind.name)
+            XCTAssertEqual(after.rest, before.rest, kind.name)
+            XCTAssertEqual(try rating(copy.url), "4", kind.name)
+            XCTAssertEqual(try ExifGPS.positions(inFileAt: copy.url, as: .png), stated, kind.name)
+        }
         try XCTSkipIf(tried == 0, "ImageIO left nothing after a PNG's packet on this system")
     }
 

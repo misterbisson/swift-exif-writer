@@ -97,6 +97,34 @@ public enum ExifGPS {
         }
     }
 
+    /// **Cuts off what follows a PNG's XMP packet in its chunk, and changes
+    /// nothing else.** Returns whether the file was changed.
+    ///
+    /// For an app that writes a PNG through ImageIO and has no position to
+    /// set. ImageIO's copy can leave the end of an older packet after the
+    /// new one's closing line, text that ExifTool reads tags out of.
+    /// `setPosition` cuts it off when it writes a PNG. This does the same
+    /// for a save that was not about the position, without giving the file
+    /// EXIF it did not have.
+    ///
+    /// A TIFF and a HEIC are left as they are: ImageIO has not been seen to
+    /// leave anything after their packets.
+    @discardableResult
+    public static func cutWhatFollowsThePacket(inFileAt url: URL, as container: ImageContainer) throws -> Bool {
+        guard container == .png else { return false }
+        let before = try Data(contentsOf: url)
+        let after = try cuttingWhatFollowsThePacket(in: before, as: container)
+        guard after != before else { return false }
+        try after.write(to: url, options: .atomic)
+        return true
+    }
+
+    /// The same bytes with what follows a PNG's XMP packet cut off.
+    public static func cuttingWhatFollowsThePacket(in data: Data, as container: ImageContainer) throws -> Data {
+        guard container == .png else { return data }
+        return try PNGFile.trimmed([UInt8](data)).map { Data($0) } ?? data
+    }
+
     /// The position the bytes state, or nil where they state none.
     public static func position(in data: Data, as container: ImageContainer) throws -> GPSPosition? {
         switch container {

@@ -147,6 +147,9 @@ cut out.
   it can hold a position the file no longer states. White space alone is
   left. So a call that finds no position to change can still change a PNG,
   and says so by returning true.
+- **`ExifGPS.cutWhatFollowsThePacket` does only that**, for an app that has
+  just written a PNG through ImageIO and has no position to set. It gives
+  the file no EXIF it did not have.
 
 ## Limits
 

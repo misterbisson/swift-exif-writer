@@ -241,10 +241,14 @@ enum ExifTool {
     ]
 
     /// What a file gains when it had no EXIF at all and is given some: the
-    /// byte order of the new EXIF, and a tag ExifTool puts in any EXIF it
-    /// starts, which says how a JPEG's colour samples sit and says nothing
-    /// about these files.
-    private static let startingExif: Set<String> = ["File:ExifByteOrder", "IFD0:YCbCrPositioning"]
+    /// byte order of the new EXIF, and the tags ExifTool puts in any EXIF it
+    /// starts. Those are defaults and not facts about the file: how a JPEG's
+    /// colour samples sit, and, from the ExifTool 12 that Ubuntu packages, a
+    /// resolution of 72 to the inch. This library writes none of them.
+    private static let startingExif: Set<String> = [
+        "File:ExifByteOrder", "IFD0:YCbCrPositioning",
+        "IFD0:XResolution", "IFD0:YResolution", "IFD0:ResolutionUnit",
+    ]
 
     /// Everything but the position, the version a new block states, and the
     /// pointer to the block, which is the position's own plumbing. `fresh`

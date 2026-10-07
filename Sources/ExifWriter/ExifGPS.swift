@@ -45,6 +45,20 @@ public enum ExifGPS {
         }
     }
 
+    /// **What the file's EXIF states and what its XMP packet states,
+    /// apart.** After a write by this library the two agree wherever the
+    /// packet states one. In a file somebody else wrote they may not.
+    public static func positions(inFileAt url: URL, as container: ImageContainer) throws -> StatedPositions {
+        switch container {
+        case .tiff:
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            return try TIFFFile.positions(in: FileStore(handle))
+        case .png, .heic:
+            return try positions(in: Data(contentsOf: url), as: container)
+        }
+    }
+
     /// **Sets the file's position, or with nil takes it out**, in its EXIF
     /// and in its XMP packet where the packet states one. Returns whether
     /// the file was changed: taking a position out of a file that has none
@@ -87,6 +101,16 @@ public enum ExifGPS {
         case .tiff: return try TIFFFile.position(in: ArrayStore(bytes: [UInt8](data)))
         case .png: return try PNGFile.position(in: [UInt8](data))
         case .heic: return try HEICFile.position(in: [UInt8](data))
+        }
+    }
+
+    /// What the bytes' EXIF states and what their XMP packet states,
+    /// apart.
+    public static func positions(in data: Data, as container: ImageContainer) throws -> StatedPositions {
+        switch container {
+        case .tiff: return try TIFFFile.positions(in: ArrayStore(bytes: [UInt8](data)))
+        case .png: return try PNGFile.positions(in: [UInt8](data))
+        case .heic: return try HEICFile.positions(in: [UInt8](data))
         }
     }
 

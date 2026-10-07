@@ -305,10 +305,20 @@ enum HEICFile {
     /// The position the HEIC states: its EXIF's, and where that has none,
     /// its XMP packet's.
     static func position(in bytes: [UInt8]) throws -> GPSPosition? {
-        if let found = try exif(bytes),
-           let stated = try GPSBlock.position(in: ArrayStore(bytes: Array(bytes[try structure(found, bytes)]))) {
-            return stated
-        }
+        try exifPosition(in: bytes) ?? packetPosition(in: bytes)
+    }
+
+    /// What the EXIF states and what the packet states, apart.
+    static func positions(in bytes: [UInt8]) throws -> StatedPositions {
+        StatedPositions(exif: try exifPosition(in: bytes), xmp: try packetPosition(in: bytes))
+    }
+
+    private static func exifPosition(in bytes: [UInt8]) throws -> GPSPosition? {
+        guard let found = try exif(bytes) else { return nil }
+        return try GPSBlock.position(in: ArrayStore(bytes: Array(bytes[try structure(found, bytes)])))
+    }
+
+    private static func packetPosition(in bytes: [UInt8]) throws -> GPSPosition? {
         guard let found = try packet(bytes) else { return nil }
         return try XMPPacket.position(in: Array(bytes[found.payload]))
     }

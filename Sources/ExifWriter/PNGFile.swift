@@ -49,10 +49,21 @@ enum PNGFile {
     /// its XMP packet's.
     static func position(in bytes: [UInt8]) throws -> GPSPosition? {
         let chunks = try chunks(bytes)
-        if let chunk = chunks.first(where: { $0.type == exif }),
-           let stated = try GPSBlock.position(in: ArrayStore(bytes: Array(bytes[chunk.data]))) {
-            return stated
-        }
+        return try exifPosition(in: bytes, chunks) ?? packetPosition(in: bytes, chunks)
+    }
+
+    /// What the EXIF states and what the packet states, apart.
+    static func positions(in bytes: [UInt8]) throws -> StatedPositions {
+        let chunks = try chunks(bytes)
+        return StatedPositions(exif: try exifPosition(in: bytes, chunks), xmp: try packetPosition(in: bytes, chunks))
+    }
+
+    private static func exifPosition(in bytes: [UInt8], _ chunks: [Chunk]) throws -> GPSPosition? {
+        guard let chunk = chunks.first(where: { $0.type == exif }) else { return nil }
+        return try GPSBlock.position(in: ArrayStore(bytes: Array(bytes[chunk.data])))
+    }
+
+    private static func packetPosition(in bytes: [UInt8], _ chunks: [Chunk]) throws -> GPSPosition? {
         guard let packet = try packet(in: bytes, chunks) else { return nil }
         return try XMPPacket.position(in: Array(bytes[packet.text]))
     }

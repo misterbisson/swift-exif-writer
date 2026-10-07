@@ -13,10 +13,14 @@ final class XMPInFilesTests: XCTestCase {
     private let camera = Fixture.Block.camera(latitude: 36.606111, longitude: -118.062778, altitude: 1136.5)
 
     private func assertSame(_ found: GPSPosition?, _ wanted: GPSPosition, _ message: String = "",
-                            file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertEqual(found?.latitude ?? .nan, wanted.latitude, accuracy: 1e-7, message, file: file, line: line)
-        XCTAssertEqual(found?.longitude ?? .nan, wanted.longitude, accuracy: 1e-7, message, file: file, line: line)
+                            accuracy: Double = 1e-7, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(found?.latitude ?? .nan, wanted.latitude, accuracy: accuracy, message, file: file, line: line)
+        XCTAssertEqual(found?.longitude ?? .nan, wanted.longitude, accuracy: accuracy, message, file: file, line: line)
     }
+
+    /// The hand-built camera's block keeps a hundredth of a second, as a
+    /// camera does, which is a little coarser than the packet beside it.
+    private let cameras = 1e-6
 
     private func set(_ position: GPSPosition?, _ bytes: [UInt8], _ container: ImageContainer) throws -> [UInt8] {
         [UInt8](try ExifGPS.settingPosition(position, in: Data(bytes), as: container))
@@ -175,6 +179,49 @@ final class XMPInFilesTests: XCTestCase {
                 let read = try ExifGPS.position(inFileAt: scratch.url, as: container)
                 if let place { assertSame(read, place, name) } else { XCTAssertNil(read, name) }
             }
+        }
+    }
+
+    /// **The two places a file states its position are read apart**, for a
+    /// caller that has to know which said it. Here they are made to
+    /// disagree, as a file somebody else wrote may.
+    func testTheEXIFAndThePacketAreReadApart() throws {
+        let elsewhere = XMPFixture(style: .exifTool).stating(sydney).bytes()
+        let none = XMPFixture(style: .exifTool).stating(nil).bytes()
+        let held = Fixture(block: camera).bytes()
+        let files: [(String, ImageContainer, ([UInt8]?, Bool) -> [UInt8])] = [
+            ("TIFF", .tiff, { packet, block in Fixture(block: block ? self.camera : .none, packet: packet).bytes() }),
+            ("PNG", .png, { packet, block in PNGFixture(exif: block ? .holding(held) : .none, packet: packet).bytes() }),
+            ("HEIC", .heic, { packet, block in
+                HEICFixture(exif: block ? held : Fixture().bytes(), packet: packet ?? HEICFixture.notes).bytes()
+            }),
+        ]
+        for (name, container, file) in files {
+            let both = try ExifGPS.positions(in: Data(file(elsewhere, true)), as: container)
+            assertSame(both.exif, whitney, name, accuracy: cameras)
+            assertSame(both.xmp, sydney, name)
+            assertSame(both.position, whitney, "the EXIF's is the file's, \(name)", accuracy: cameras)
+
+            let packetOnly = try ExifGPS.positions(in: Data(file(elsewhere, false)), as: container)
+            XCTAssertNil(packetOnly.exif, name)
+            assertSame(packetOnly.xmp, sydney, name)
+            assertSame(packetOnly.position, sydney, name)
+
+            let blockOnly = try ExifGPS.positions(in: Data(file(none, true)), as: container)
+            assertSame(blockOnly.exif, whitney, name, accuracy: cameras)
+            XCTAssertNil(blockOnly.xmp, name)
+
+            XCTAssertEqual(try ExifGPS.positions(in: Data(file(nil, false)), as: container),
+                           StatedPositions(exif: nil, xmp: nil), name)
+
+            // From a file as from its bytes, and a write brings the two
+            // into step.
+            let scratch = try Scratch(file(elsewhere, true), extension: container.fileExtension)
+            XCTAssertEqual(try ExifGPS.positions(inFileAt: scratch.url, as: container), both, name)
+            try ExifGPS.setPosition(bixby, inFileAt: scratch.url, as: container)
+            let after = try ExifGPS.positions(inFileAt: scratch.url, as: container)
+            assertSame(after.exif, bixby, name)
+            assertSame(after.xmp, bixby, name)
         }
     }
 

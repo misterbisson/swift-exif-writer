@@ -64,7 +64,14 @@ is where a position belongs, and a second copy is kept in step only where
 somebody already put one.
 
 Reading gives the EXIF's position, and the packet's where the EXIF has
-none.
+none. To know which said it, or whether a file somebody else wrote says two
+different places, ask for them apart:
+
+```swift
+let stated = try ExifGPS.positions(inFileAt: url, as: .png)
+stated.exif    // what the EXIF's GPS block states
+stated.xmp     // what the XMP packet states
+```
 
 ## How
 

@@ -29,7 +29,15 @@ enum TIFFFile {
     /// The position the file states: its GPS block's, and where it has
     /// none there, its XMP packet's.
     static func position(in store: ByteStore) throws -> GPSPosition? {
-        if let stated = try GPSBlock.position(in: store) { return stated }
+        try GPSBlock.position(in: store) ?? packetPosition(in: store)
+    }
+
+    /// What the block states and what the packet states, apart.
+    static func positions(in store: ByteStore) throws -> StatedPositions {
+        StatedPositions(exif: try GPSBlock.position(in: store), xmp: try packetPosition(in: store))
+    }
+
+    private static func packetPosition(in store: ByteStore) throws -> GPSPosition? {
         guard let packet = try packet(in: store) else { return nil }
         return try XMPPacket.position(in: packet.bytes)
     }

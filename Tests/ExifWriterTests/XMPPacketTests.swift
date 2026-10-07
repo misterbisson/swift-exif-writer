@@ -151,9 +151,10 @@ final class XMPPacketTests: XCTestCase {
         }
     }
 
-    /// **What follows the packet's closing line is not the packet.** ImageIO
-    /// copying a PNG leaves the tail of a longer packet there, which is not
-    /// XML, and it is carried through as it was.
+    /// **What follows the packet's closing line is not the packet.** When
+    /// ImageIO copies a PNG and the packet comes out shorter, it leaves the
+    /// tail of the old one there, which is not XML. It is carried through
+    /// as it was.
     func testWhatFollowsTheClosingLineIsNotRead() throws {
         let residue = "/exifEX:LensModel>\n      </rdf:Description>\n   </rdf:RDF>\n</x:xmpmeta>\n"
         for style in [XMPFixture.Style.lightroom, .exifTool] {

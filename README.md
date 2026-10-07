@@ -128,10 +128,11 @@ cut out.
   the file, with room for any position, and the eight bytes that say where
   it is and how long are changed. That happens once. The packet it replaces
   stays in the bytes, unreferenced.
-- **The packet ends at its closing line**, `<?xpacket end=…?>`. ImageIO
-  copying a PNG leaves the tail of a longer packet after that line, inside
-  the same chunk (measured on macOS 27.0.1). It is carried through as it
-  was and not read.
+- **The packet ends at its closing line**, `<?xpacket end=…?>`. When
+  ImageIO copies a PNG and the packet comes out shorter, it keeps the
+  chunk's length and leaves the tail of the old packet after that line
+  (measured on macOS 27.0.1: 201 bytes of one). That tail is carried
+  through as it was and not read.
 
 ## Limits
 
@@ -144,6 +145,11 @@ cut out.
 - **A position in a nested structure or under another namespace is not the
   file's position** and is left alone. So is one an app keeps under a
   namespace of its own.
+- **What lies after a packet's closing line is neither read nor changed.**
+  ExifTool does read whole tags out of those bytes, and warns that their
+  namespaces are out of scope. So a position that is stated only in what
+  ImageIO left there is one ExifTool may report and this library will not
+  touch.
 - **A PNG's packet in an old-style text chunk is not read.** Some tools
   have written XMP as a `tEXt` or `zTXt` "raw profile". Only the `iTXt`
   chunk the XMP specification names is.

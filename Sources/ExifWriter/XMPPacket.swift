@@ -226,9 +226,11 @@ enum XMPPacket {
             var at = 0
             while let open = bytes[at...].firstIndex(of: 0x3C) {
                 if has("<?xpacket end", open) {
-                    // **The packet ends here, whatever follows.** ImageIO
-                    // copying a PNG leaves the tail of a longer packet
-                    // after this line, inside the same chunk.
+                    // **The packet ends here, whatever follows.** When
+                    // ImageIO copies a PNG and the packet comes out
+                    // shorter, it keeps the chunk's length and leaves the
+                    // tail of the old packet after this line. That tail is
+                    // not XML. It is carried through and not read.
                     break
                 } else if has("<?", open) {
                     at = try end(of: "?>", from: open + 2)

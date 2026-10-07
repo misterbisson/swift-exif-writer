@@ -14,6 +14,8 @@ try ExifGPS.setPosition(bixby, inFileAt: url, as: .tiff)
 
 try ExifGPS.position(inFileAt: url, as: .tiff)      // the position, or nil
 try ExifGPS.setPosition(nil, inFileAt: url, as: .tiff)   // take it out
+
+try ExifGPS.setPosition(bixby, inFileAt: other, as: .png)
 ```
 
 ## Why
@@ -34,7 +36,7 @@ Swift, checked against ExifTool.
 | Format | Status |
 | --- | --- |
 | TIFF | Written and read |
-| PNG | Planned |
+| PNG | Written and read |
 | HEIC | Planned |
 
 The caller says which format a file is. Most cameras' raw files are TIFF
@@ -49,26 +51,47 @@ faced and everything else in the GPS block are carried across as they were.
 
 ## How
 
-Nothing that is already in the file moves. A TIFF structure is full of
-offsets counted from its first byte, and some are in places a general
-reader cannot find, so the structure is never rebuilt:
+EXIF is a TIFF structure wherever it is kept: a TIFF file is one, and a PNG
+holds one in its `eXIf` chunk. Nothing that is already in that structure
+moves. It is full of offsets counted from its first byte, and some are in
+places a general reader cannot find, so it is never rebuilt:
 
 - A new GPS block is written at the end of the file, and the four bytes
   that point at the block are changed.
 - Where the first directory has no pointer to a block, a copy of that
   directory with one added goes at the end too, and the four bytes in the
   header that point at the directory are changed.
-- A block this library wrote is the last thing in the file. Writing again
-  cuts it off and writes the new one in the same place, so a second write
-  does not grow the file.
+- A block this library wrote is the last thing in the structure. Writing
+  again cuts it off and writes the new one in the same place, so a second
+  write does not grow the file.
 
-The first write adds a few hundred bytes. The file is edited where it
-stands: the new block is written first and the pointer to it last, so an
-interrupted write leaves the picture and the rest of the metadata readable.
-If you need all or nothing, write into a copy and move it into place.
+The first write adds a few hundred bytes.
+
+**A TIFF is edited where it stands.** The new block is written first and
+the pointer to it last, so an interrupted write leaves the picture and the
+rest of the metadata readable. If you need all or nothing, write into a
+copy and move it into place.
+
+**A PNG is written whole to a new file, which then takes its place.** Its
+EXIF chunk grows, or a new one goes in before the picture's data, and every
+other chunk is carried across as the bytes it was. A PNG that had no EXIF,
+given a position and then relieved of it, is byte for byte the file it
+started as. EXIF found after the picture's data is moved before it, where
+the format asks for it and where ExifTool puts it.
 
 ## Limits
 
+- **It writes the EXIF, and not the XMP.** A file can state its position a
+  second time in its XMP packet, as `exif:GPSLatitude` and
+  `exif:GPSLongitude`. That copy is left as it was. If your files have one,
+  change it with whatever you write XMP with, in the same save. Apple's
+  ImageIO writes one into a PNG whenever it writes a position there, and
+  reads it back when the EXIF has none.
+- **Set a PNG's position after ImageIO has copied the file, not before.**
+  `CGImageDestinationCopyImageSource` rewrites a PNG's EXIF, and on macOS
+  27.0.1 a position came out of that copy with its latitude and without
+  its longitude, whoever had written it. A TIFF comes through the same
+  copy with its position intact.
 - **BigTIFF is refused**, and so is a file that would pass 4 GB.
 - **It is a writer, not a scrubber.** A block that was replaced and was not
   the last thing in the file stays in the bytes, unreferenced. Do not use
@@ -86,10 +109,10 @@ If you need all or nothing, write into a copy and move it into place.
   they were. This reads what ExifTool wrote. ExifTool's validation finds
   nothing wrong with a file from here that it does not find wrong with one
   it wrote itself.
-- **Against ImageIO**, on macOS, on TIFFs ImageIO wrote: 8 and 16 bits,
-  compressed and not, more than one page. It reads the position, the same
-  decoded picture and the same properties, and can copy the file afterwards
-  without losing the position.
+- **Against ImageIO**, on macOS, on TIFFs and PNGs ImageIO wrote: 8 and 16
+  bits, compressed and not, a TIFF of more than one page, a PNG with no
+  metadata at all. It reads the position, the same decoded picture and the
+  same properties.
 
 CI runs all of it on macOS and the first two on Linux, and fails if
 ExifTool is missing.

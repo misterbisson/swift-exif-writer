@@ -1,0 +1,97 @@
+import Foundation
+
+/// **A PNG, as far as its chunks**, and the one chunk that holds EXIF.
+///
+/// A PNG is a signature and then chunks, each a length, a four-letter type,
+/// its data and a checksum. Nothing in it is an offset into the file, so a
+/// chunk can grow, or a new one go in, and everything after it simply sits
+/// further along. EXIF is the `eXIf` chunk, whose data is a TIFF structure
+/// from its first byte.
+///
+/// Every chunk but `eXIf` is carried across as the bytes it was.
+enum PNGFile {
+    static let signature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    private static let exif = [UInt8]("eXIf".utf8)
+    private static let data = [UInt8]("IDAT".utf8)
+
+    struct Chunk {
+        let type: [UInt8]
+        /// Where the chunk starts, at its length.
+        let start: Int
+        let data: Range<Int>
+        /// One past the chunk's checksum.
+        var end: Int { data.upperBound + 4 }
+    }
+
+    static func chunks(_ bytes: [UInt8]) throws -> [Chunk] {
+        guard bytes.count >= 8, Array(bytes[..<8]) == signature else {
+            throw ExifWriterError.notThisFormat("a PNG")
+        }
+        var out: [Chunk] = []
+        var at = 8
+        while at < bytes.count {
+            guard at + 12 <= bytes.count else { throw ExifWriterError.malformed("a PNG chunk cut short") }
+            let length = Int(TIFFStructure.u32(bytes, at, false))
+            let chunk = Chunk(type: Array(bytes[at + 4..<at + 8]), start: at, data: at + 8..<at + 8 + length)
+            guard chunk.end <= bytes.count else { throw ExifWriterError.malformed("a PNG chunk cut short") }
+            out.append(chunk)
+            at = chunk.end
+        }
+        return out
+    }
+
+    static func position(in bytes: [UInt8]) throws -> GPSPosition? {
+        guard let chunk = try chunks(bytes).first(where: { $0.type == exif }) else { return nil }
+        return try GPSBlock.position(in: ArrayStore(bytes: Array(bytes[chunk.data])))
+    }
+
+    /// The same PNG with the position set, or with nil taken out. Nil where
+    /// there is nothing to change.
+    static func setting(_ position: GPSPosition?, in bytes: [UInt8]) throws -> [UInt8]? {
+        let chunks = try chunks(bytes)
+        let picture = chunks.first { $0.type == data }
+        if let chunk = chunks.first(where: { $0.type == exif }) {
+            let held = Array(bytes[chunk.data])
+            let edit = try GPSBlock.plan(ArrayStore(bytes: held), setting: position)
+            let without = Array(bytes[..<chunk.start]) + Array(bytes[chunk.end...])
+            // The EXIF said nothing but the position: the chunk goes whole.
+            if edit.leavesNothing { return without }
+            guard !edit.isEmpty else { return nil }
+            let written = self.chunk(exif, edit.applied(to: held))
+            // **EXIF after the picture's data is moved before it.** The
+            // format allows either and asks for before, some readers miss
+            // it after, and ExifTool moves it too whenever it writes.
+            let at = picture.map { min($0.start, chunk.start) } ?? chunk.start
+            return Array(without[..<at]) + written + Array(without[at...])
+        }
+        guard let position else { return nil }
+        // No EXIF at all: a new chunk, before the picture's data, which is
+        // where the format asks for it.
+        guard let first = picture else {
+            throw ExifWriterError.malformed("a PNG with no picture data")
+        }
+        let seed = GPSBlock.seed()
+        let held = try GPSBlock.plan(ArrayStore(bytes: seed), setting: position).applied(to: seed)
+        return Array(bytes[..<first.start]) + chunk(exif, held) + Array(bytes[first.start...])
+    }
+
+    /// A chunk as it is written: length, type, data, and the checksum over
+    /// the type and the data.
+    static func chunk(_ type: [UInt8], _ data: [UInt8]) -> [UInt8] {
+        let body = type + data
+        return big(UInt32(data.count)) + body + big(crc(body))
+    }
+
+    private static func big(_ value: UInt32) -> [UInt8] {
+        [UInt8(value >> 24), UInt8(value >> 16 & 0xFF), UInt8(value >> 8 & 0xFF), UInt8(value & 0xFF)]
+    }
+
+    private static let table: [UInt32] = (0..<256).map { index in
+        (0..<8).reduce(UInt32(index)) { crc, _ in crc & 1 == 1 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1 }
+    }
+
+    /// The CRC-32 every PNG chunk ends with.
+    static func crc(_ bytes: [UInt8]) -> UInt32 {
+        ~bytes.reduce(0xFFFF_FFFF) { crc, byte in table[Int((crc ^ UInt32(byte)) & 0xFF)] ^ (crc >> 8) }
+    }
+}

@@ -1,6 +1,6 @@
 import Foundation
 
-public enum ExifWriterError: Error, Equatable, CustomStringConvertible {
+public enum ExifWriterError: Error, Equatable, Sendable, CustomStringConvertible {
     /// The bytes are not the format they were said to be.
     case notThisFormat(String)
     /// The format is right and its structure is broken.

@@ -16,29 +16,16 @@ final class ExifToolTests: XCTestCase {
     private let bixby = GPSPosition(latitude: 36.371389, longitude: -121.901944)!
     private let sydney = GPSPosition(latitude: -33.856784, longitude: 151.215297)!
 
-    private var fixtures: [(name: String, bytes: [UInt8])] {
-        [("little, no block", Fixture().bytes()),
-         ("big, no block", Fixture(little: false).bytes()),
-         ("little, camera", Fixture(block: .camera(latitude: 36.606111, longitude: -118.062778,
-                                                   altitude: 1136.5)).bytes()),
-         ("big, camera", Fixture(little: false,
-                                 block: .camera(latitude: 36.606111, longitude: -118.062778,
-                                                altitude: 1136.5)).bytes()),
-         ("little, block last", Fixture(block: .camera(latitude: 1, longitude: 2, altitude: 3),
-                                        blockLast: true).bytes()),
-         ("little, altitude only", Fixture(block: .altitudeOnly(250)).bytes())]
-    }
-
     // MARK: - ExifTool reads what this library wrote
 
     func testExifToolReadsThePositionThisWrote() throws {
-        for fixture in fixtures {
+        for sample in Sample.all {
             for place in [bixby, sydney] {
-                let file = try Scratch(fixture.bytes)
-                try ExifGPS.setPosition(place, inFileAt: file.url, as: .tiff)
+                let file = try sample.scratch()
+                try ExifGPS.setPosition(place, inFileAt: file.url, as: sample.container)
                 let read = try ExifTool.position(file.url)
-                XCTAssertEqual(read?.latitude ?? .nan, place.latitude, accuracy: 1e-7, fixture.name)
-                XCTAssertEqual(read?.longitude ?? .nan, place.longitude, accuracy: 1e-7, fixture.name)
+                XCTAssertEqual(read?.latitude ?? .nan, place.latitude, accuracy: 1e-7, sample.name)
+                XCTAssertEqual(read?.longitude ?? .nan, place.longitude, accuracy: 1e-7, sample.name)
             }
         }
     }
@@ -47,18 +34,20 @@ final class ExifToolTests: XCTestCase {
     /// every other tag, where the picture's data is, and a digest of that
     /// data.
     func testNothingButThePositionChanges() throws {
-        for fixture in fixtures {
-            let file = try Scratch(fixture.bytes)
+        for sample in Sample.all {
+            let file = try sample.scratch()
             let before = try ExifTool.everything(file.url)
-            try ExifGPS.setPosition(bixby, inFileAt: file.url, as: .tiff)
+            let fresh = before["File:ExifByteOrder"] == nil
+            try ExifGPS.setPosition(bixby, inFileAt: file.url, as: sample.container)
             let placed = try ExifTool.everything(file.url)
-            XCTAssertEqual(ExifTool.withoutPosition(placed), ExifTool.withoutPosition(before), fixture.name)
+            XCTAssertEqual(ExifTool.withoutPosition(placed, fresh: fresh),
+                           ExifTool.withoutPosition(before, fresh: fresh), sample.name)
             XCTAssertNotNil(placed["ImageDataHash"], "the digest of the picture was compared")
 
-            try ExifGPS.setPosition(nil, inFileAt: file.url, as: .tiff)
+            try ExifGPS.setPosition(nil, inFileAt: file.url, as: sample.container)
             let cleared = try ExifTool.everything(file.url)
-            XCTAssertEqual(ExifTool.withoutPosition(cleared), ExifTool.withoutPosition(before), fixture.name)
-            XCTAssertNil(try ExifTool.position(file.url), fixture.name)
+            XCTAssertEqual(ExifTool.withoutPosition(cleared), ExifTool.withoutPosition(before), sample.name)
+            XCTAssertNil(try ExifTool.position(file.url), sample.name)
         }
     }
 
@@ -68,66 +57,104 @@ final class ExifToolTests: XCTestCase {
     /// Its own file is the measure, and not the file before, because its
     /// validation asks more of a GPS block than of a file with none: it
     /// warns that a block it has just written lacks `GPSProcessingMethod`.
-    /// Once the position is taken out the file is held to what it was.
+    /// Once the position is taken out the file may have no fault it did not
+    /// start with. It may have fewer: a PNG's EXIF found after the picture
+    /// is moved before it, which is one warning gone.
     func testExifToolFindsNoFaultItsOwnWritingLacks() throws {
-        for fixture in fixtures {
-            let ours = try Scratch(fixture.bytes)
-            let theirs = try Scratch(fixture.bytes)
+        for sample in Sample.all {
+            let ours = try sample.scratch()
+            let theirs = try sample.scratch()
             let before = try ExifTool.faults(ours.url)
             try ExifTool.setPosition(bixby, theirs.url)
             let reference = try ExifTool.faults(theirs.url)
 
-            try ExifGPS.setPosition(sydney, inFileAt: ours.url, as: .tiff)
-            XCTAssertEqual(try ExifTool.faults(ours.url), reference, "placed, \(fixture.name)")
-            try ExifGPS.setPosition(bixby, inFileAt: ours.url, as: .tiff)
-            XCTAssertEqual(try ExifTool.faults(ours.url), reference, "moved, \(fixture.name)")
-            try ExifGPS.setPosition(nil, inFileAt: ours.url, as: .tiff)
-            XCTAssertEqual(try ExifTool.faults(ours.url), before, "cleared, \(fixture.name)")
+            try ExifGPS.setPosition(sydney, inFileAt: ours.url, as: sample.container)
+            XCTAssertEqual(try ExifTool.faults(ours.url), reference, "placed, \(sample.name)")
+            try ExifGPS.setPosition(bixby, inFileAt: ours.url, as: sample.container)
+            XCTAssertEqual(try ExifTool.faults(ours.url), reference, "moved, \(sample.name)")
+            try ExifGPS.setPosition(nil, inFileAt: ours.url, as: sample.container)
+            let cleared = try ExifTool.faults(ours.url)
+            XCTAssertEqual(cleared.filter { !before.contains($0) }, [], "cleared, \(sample.name)")
         }
     }
 
     // MARK: - This library reads what ExifTool wrote
 
     func testThisReadsThePositionExifToolWrote() throws {
-        for fixture in fixtures {
+        for sample in Sample.all {
             for place in [bixby, sydney] {
-                let file = try Scratch(fixture.bytes)
+                let file = try sample.scratch()
                 try ExifTool.setPosition(place, file.url)
-                let read = try ExifGPS.position(inFileAt: file.url, as: .tiff)
-                XCTAssertEqual(read?.latitude ?? .nan, place.latitude, accuracy: 1e-7, fixture.name)
-                XCTAssertEqual(read?.longitude ?? .nan, place.longitude, accuracy: 1e-7, fixture.name)
+                let read = try ExifGPS.position(inFileAt: file.url, as: sample.container)
+                XCTAssertEqual(read?.latitude ?? .nan, place.latitude, accuracy: 1e-7, sample.name)
+                XCTAssertEqual(read?.longitude ?? .nan, place.longitude, accuracy: 1e-7, sample.name)
             }
         }
     }
 
     /// **The two writers leave files ExifTool describes the same way.**
     func testBothWritersLeaveTheSameTags() throws {
-        for fixture in fixtures {
-            let ours = try Scratch(fixture.bytes)
-            let theirs = try Scratch(fixture.bytes)
-            try ExifGPS.setPosition(bixby, inFileAt: ours.url, as: .tiff)
+        for sample in Sample.all {
+            let ours = try sample.scratch()
+            let theirs = try sample.scratch()
+            let fresh = try ExifTool.everything(ours.url)["File:ExifByteOrder"] == nil
+            try ExifGPS.setPosition(bixby, inFileAt: ours.url, as: sample.container)
             try ExifTool.setPosition(bixby, theirs.url)
-            XCTAssertEqual(ExifTool.comparable(try ExifTool.everything(ours.url)),
-                           ExifTool.comparable(try ExifTool.everything(theirs.url)), fixture.name)
+            XCTAssertEqual(ExifTool.comparable(try ExifTool.everything(ours.url), fresh: fresh),
+                           ExifTool.comparable(try ExifTool.everything(theirs.url), fresh: fresh), sample.name)
         }
     }
 
     /// This library moves and clears a position ExifTool wrote, and ExifTool
     /// agrees with the result.
     func testThisEditsWhatExifToolWrote() throws {
-        for fixture in fixtures {
-            let file = try Scratch(fixture.bytes)
+        for sample in Sample.all {
+            let file = try sample.scratch()
             try ExifTool.setPosition(sydney, file.url)
             let before = try ExifTool.everything(file.url)
-            try ExifGPS.setPosition(bixby, inFileAt: file.url, as: .tiff)
+            try ExifGPS.setPosition(bixby, inFileAt: file.url, as: sample.container)
             let read = try ExifTool.position(file.url)
-            XCTAssertEqual(read?.latitude ?? .nan, bixby.latitude, accuracy: 1e-7, fixture.name)
+            XCTAssertEqual(read?.latitude ?? .nan, bixby.latitude, accuracy: 1e-7, sample.name)
             XCTAssertEqual(ExifTool.withoutPosition(try ExifTool.everything(file.url)),
-                           ExifTool.withoutPosition(before), fixture.name)
-            try ExifGPS.setPosition(nil, inFileAt: file.url, as: .tiff)
-            XCTAssertNil(try ExifTool.position(file.url), fixture.name)
+                           ExifTool.withoutPosition(before), sample.name)
+            try ExifGPS.setPosition(nil, inFileAt: file.url, as: sample.container)
+            XCTAssertNil(try ExifTool.position(file.url), sample.name)
         }
     }
+}
+
+/// One hand-built file the two writers are both put to.
+struct Sample {
+    let name: String
+    let container: ImageContainer
+    let bytes: [UInt8]
+
+    func scratch() throws -> Scratch {
+        try Scratch(bytes, extension: container == .tiff ? "tif" : "png")
+    }
+
+    private static let camera = Fixture.Block.camera(latitude: 36.606111, longitude: -118.062778,
+                                                     altitude: 1136.5)
+
+    static let all: [Sample] = [
+        Sample(name: "TIFF, little, no block", container: .tiff, bytes: Fixture().bytes()),
+        Sample(name: "TIFF, big, no block", container: .tiff, bytes: Fixture(little: false).bytes()),
+        Sample(name: "TIFF, little, camera", container: .tiff, bytes: Fixture(block: camera).bytes()),
+        Sample(name: "TIFF, big, camera", container: .tiff,
+               bytes: Fixture(little: false, block: camera).bytes()),
+        Sample(name: "TIFF, little, block last", container: .tiff,
+               bytes: Fixture(block: .camera(latitude: 1, longitude: 2, altitude: 3), blockLast: true).bytes()),
+        Sample(name: "TIFF, little, altitude only", container: .tiff,
+               bytes: Fixture(block: .altitudeOnly(250)).bytes()),
+        Sample(name: "PNG, no EXIF", container: .png, bytes: PNGFixture().bytes()),
+        Sample(name: "PNG, little EXIF with a camera's block", container: .png,
+               bytes: PNGFixture(exif: .holding(Fixture(block: camera).bytes())).bytes()),
+        Sample(name: "PNG, big EXIF with a camera's block", container: .png,
+               bytes: PNGFixture(exif: .holding(Fixture(little: false, block: camera).bytes())).bytes()),
+        Sample(name: "PNG, EXIF after the picture", container: .png,
+               bytes: PNGFixture(exif: .holding(Fixture(block: .altitudeOnly(250)).bytes()),
+                                 exifLast: true).bytes()),
+    ]
 }
 
 /// A file in the temporary directory that goes when the test does.
@@ -213,19 +240,27 @@ enum ExifTool {
         "Composite:GPSLatitude", "Composite:GPSLongitude", "Composite:GPSPosition",
     ]
 
+    /// What a file gains when it had no EXIF at all and is given some: the
+    /// byte order of the new EXIF, and a tag ExifTool puts in any EXIF it
+    /// starts, which says how a JPEG's colour samples sit and says nothing
+    /// about these files.
+    private static let startingExif: Set<String> = ["File:ExifByteOrder", "IFD0:YCbCrPositioning"]
+
     /// Everything but the position, the version a new block states, and the
-    /// pointer to the block, which is the position's own plumbing.
-    static func withoutPosition(_ tags: [String: String]) -> [String: String] {
+    /// pointer to the block, which is the position's own plumbing. `fresh`
+    /// where the file had no EXIF before.
+    static func withoutPosition(_ tags: [String: String], fresh: Bool = false) -> [String: String] {
         ofTheFile(tags).filter {
             !position.contains($0.key) && $0.key != "GPS:GPSVersionID" && !$0.key.hasSuffix(":GPSInfo")
+                && !(fresh && startingExif.contains($0.key))
         }
     }
 
     /// For comparing two writers' files: positions rounded to what both
     /// keep, and the plumbing left out. Where the picture's data sits is
     /// plumbing here, because ExifTool lays the file out afresh.
-    static func comparable(_ tags: [String: String]) -> [String: String] {
-        var out = withoutPosition(tags).filter { !$0.key.hasSuffix(":StripOffsets") }
+    static func comparable(_ tags: [String: String], fresh: Bool = false) -> [String: String] {
+        var out = withoutPosition(tags, fresh: fresh).filter { !$0.key.hasSuffix(":StripOffsets") }
         for key in ["Composite:GPSLatitude", "Composite:GPSLongitude"] {
             out[key] = tags[key].flatMap(Double.init).map { String(format: "%.6f", $0) }
         }
@@ -247,10 +282,11 @@ enum ExifTool {
                  "-GPSLongitudeRef=\(position.longitude < 0 ? "W" : "E")", url.path])
     }
 
-    /// What ExifTool's own validation says is wrong with the file.
+    /// What ExifTool's own validation says is wrong with the file: each
+    /// warning and error, without the line that counts them.
     static func faults(_ url: URL) throws -> [String] {
         try run(["-validate", "-warning", "-error", "-a", "-s", url.path])
-            .split(separator: "\n").map(String.init).sorted()
+            .split(separator: "\n").map(String.init).filter { !$0.hasPrefix("Validate") }.sorted()
     }
 }
 #endif

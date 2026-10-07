@@ -158,45 +158,76 @@ final class TextImageIOTests: XCTestCase {
         }
     }
 
+    /// The copy the use this was written for begins with: ImageIO's own,
+    /// handed a camera, a lens and a time, and asked to take the maker and
+    /// the lens's maker out.
+    private func copied(_ kind: Kind) throws -> Scratch {
+        let scratch = try file(kind)
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(scratch.url as CFURL, nil))
+        let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil)
+            .flatMap { CGImageMetadataCreateMutableCopy($0) } ?? CGImageMetadataCreateMutable()
+        XCTAssertTrue(CGImageMetadataRegisterNamespaceForPrefix(
+            metadata, "http://example.com/ns/1.0/" as CFString, "example" as CFString, nil))
+        XCTAssertTrue(CGImageMetadataSetValueWithPath(
+            metadata, nil, "example:RollID" as CFString, "a roll" as CFString))
+        for (dictionary, key, value) in [
+            (kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFModel, "Nikon FE2"),
+            (kCGImagePropertyExifDictionary, kCGImagePropertyExifDateTimeOriginal, "2019:07:04 22:30:00"),
+            (kCGImagePropertyExifDictionary, kCGImagePropertyExifDateTimeDigitized, "2020:09:13 05:26:40"),
+            (kCGImagePropertyExifDictionary, kCGImagePropertyExifOffsetTimeOriginal, "+02:00"),
+            (kCGImagePropertyExifDictionary, kCGImagePropertyExifLensModel, "Nikkor 50mm f/1.8"),
+        ] {
+            CGImageMetadataSetValueMatchingImageProperty(metadata, dictionary, key, value as CFString)
+        }
+        CGImageMetadataRemoveTagWithPath(metadata, nil, "tiff:Make" as CFString)
+        CGImageMetadataRemoveTagWithPath(metadata, nil, "exifEX:LensMake" as CFString)
+
+        let copy = try Scratch([], extension: "tif")
+        let destination = try XCTUnwrap(
+            CGImageDestinationCreateWithURL(copy.url as CFURL, "public.tiff" as CFString, 1, nil))
+        XCTAssertTrue(CGImageDestinationCopyImageSource(
+            destination, source, [kCGImageDestinationMetadata: metadata] as CFDictionary, nil), kind.name)
+        return copy
+    }
+
+    private let asked: [ExifTag] = [.make, .model, .dateTimeOriginal, .dateTimeDigitized, .offsetTimeOriginal,
+                                    .lensMake, .lensModel]
+
+    /// What the file's directories hold of each tag the copy was asked
+    /// about, read by this library and not by ImageIO. ImageIO gives a date
+    /// the EXIF lacks out of the packet, so through it both dates look
+    /// written by a copy that wrote neither.
+    private func held(_ url: URL) throws -> [ExifTag: String] {
+        var out: [ExifTag: String] = [:]
+        for tag in asked { out[tag] = try ExifText.text(of: tag, inFileAt: url, as: .tiff) }
+        return out
+    }
+
     /// **The use this was written for.** ImageIO's copy is handed a camera,
     /// a lens and a time, and writes a file that does not state them all.
-    /// The text and the position are then set in that file, and ImageIO
-    /// reads every one, the same picture, and the packet the copy wrote.
+    /// The text and the position are then set in that file, and the
+    /// directories hold every one, ImageIO reads every one, the same
+    /// picture, and the packet the copy wrote.
     ///
     /// What the copy got wrong is not asserted: that is Apple's to change,
-    /// and this has to hold either way.
+    /// and this has to hold either way. It is printed, so a run on another
+    /// macOS shows what changed without failing on it.
     func testWhatImageIOsCopyLeftIsSetRight() throws {
         let sydney = GPSPosition(latitude: -33.856784, longitude: 151.215297)!
         for kind in kinds {
-            let scratch = try file(kind)
-            let before = try see(scratch.url)
-            let source = try XCTUnwrap(CGImageSourceCreateWithURL(scratch.url as CFURL, nil))
-            let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil)
-                .flatMap { CGImageMetadataCreateMutableCopy($0) } ?? CGImageMetadataCreateMutable()
-            XCTAssertTrue(CGImageMetadataRegisterNamespaceForPrefix(
-                metadata, "http://example.com/ns/1.0/" as CFString, "example" as CFString, nil))
-            XCTAssertTrue(CGImageMetadataSetValueWithPath(
-                metadata, nil, "example:RollID" as CFString, "a roll" as CFString))
-            for (dictionary, key, value) in [
-                (kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFModel, "Nikon FE2"),
-                (kCGImagePropertyExifDictionary, kCGImagePropertyExifDateTimeOriginal, "2019:07:04 22:30:00"),
-                (kCGImagePropertyExifDictionary, kCGImagePropertyExifDateTimeDigitized, "2020:09:13 05:26:40"),
-                (kCGImagePropertyExifDictionary, kCGImagePropertyExifOffsetTimeOriginal, "+02:00"),
-                (kCGImagePropertyExifDictionary, kCGImagePropertyExifLensModel, "Nikkor 50mm f/1.8"),
-            ] {
-                CGImageMetadataSetValueMatchingImageProperty(metadata, dictionary, key, value as CFString)
-            }
-            CGImageMetadataRemoveTagWithPath(metadata, nil, "tiff:Make" as CFString)
-            CGImageMetadataRemoveTagWithPath(metadata, nil, "exifEX:LensMake" as CFString)
-
-            let copy = try Scratch([], extension: "tif")
-            let destination = try XCTUnwrap(
-                CGImageDestinationCreateWithURL(copy.url as CFURL, "public.tiff" as CFString, 1, nil))
-            XCTAssertTrue(CGImageDestinationCopyImageSource(
-                destination, source, [kCGImageDestinationMetadata: metadata] as CFDictionary, nil), kind.name)
+            // Held by name: a file nothing holds is removed before it is read.
+            let original = try file(kind)
+            let before = try see(original.url)
+            let copy = try copied(kind)
+            let left = try held(copy.url)
+            print("ImageIO's copy left, \(kind.name): "
+                  + asked.map { "\($0) \(left[$0] ?? "none")" }.joined(separator: ", "))
 
             try ExifText.set(text, removing: [.make, .lensMake], inFileAt: copy.url, as: .tiff)
             try ExifGPS.setPosition(sydney, inFileAt: copy.url, as: .tiff)
+
+            // The directories, which ImageIO's reading cannot vouch for.
+            XCTAssertEqual(try held(copy.url), text, kind.name)
 
             let after = try see(copy.url)
             assertText(after, kind.name)
@@ -218,6 +249,38 @@ final class TextImageIOTests: XCTestCase {
             // And a second write of the same things changes nothing.
             XCTAssertFalse(try ExifText.set(text, removing: [.make, .lensMake], inFileAt: copy.url, as: .tiff),
                            kind.name)
+        }
+    }
+
+    /// **ExifTool reads the same out of the directories after the copy was
+    /// set right**, which is the reader that does not fill a date in from
+    /// the packet. A page at a time: ExifTool reports each page's EXIF
+    /// under one name.
+    func testExifToolReadsTheDirectoriesOfACopySetRight() throws {
+        for kind in kinds where kind.pages == 1 {
+            let copy = try copied(kind)
+            try ExifText.set(text, removing: [.make, .lensMake], inFileAt: copy.url, as: .tiff)
+            let read = try ExifTool.everything(copy.url)
+            XCTAssertEqual(read["IFD0:Model"], "Nikon FE2", kind.name)
+            XCTAssertNil(read["IFD0:Make"], kind.name)
+            XCTAssertEqual(read["ExifIFD:DateTimeOriginal"], "2019:07:04 22:30:00", kind.name)
+            XCTAssertEqual(read["ExifIFD:CreateDate"], "2020:09:13 05:26:40", kind.name)
+            XCTAssertEqual(read["ExifIFD:OffsetTimeOriginal"], "+02:00", kind.name)
+            XCTAssertEqual(read["ExifIFD:LensModel"], "Nikkor 50mm f/1.8", kind.name)
+            XCTAssertNil(read["ExifIFD:LensMake"], kind.name)
+        }
+    }
+
+    /// **ImageIO reads text that is not ASCII as it was set**, in a file
+    /// that stated nothing and in one that stated all of it.
+    func testImageIOReadsTextThatIsNotASCII() throws {
+        let lens = "Pentax 28–70mm ƒ/4", camera = "Зенит-Е"
+        for kind in kinds.prefix(2) {
+            let scratch = try file(kind)
+            try ExifText.set([.model: camera, .lensModel: lens], inFileAt: scratch.url, as: .tiff)
+            let seen = try see(scratch.url)
+            XCTAssertEqual(seen.text[kCGImagePropertyTIFFModel as String], camera, kind.name)
+            XCTAssertEqual(seen.text[kCGImagePropertyExifLensModel as String], lens, kind.name)
         }
     }
 

@@ -90,6 +90,48 @@ struct TIFFStructure {
         return Directory(offset: offset, entries: entries, next: u32(raw, 12 * count))
     }
 
+    /// **Every directory that can be found from the first one**: each page
+    /// down the chain, and under each its EXIF directory, its GPS block, the
+    /// interoperability directory an EXIF directory points at, and its
+    /// sub-directories.
+    ///
+    /// For a write that puts bytes over a value: it has to know that no other
+    /// directory keeps a value in the same bytes. `whole` is false where a
+    /// pointer led somewhere a directory could not be read, and then there
+    /// may be directories this did not find.
+    ///
+    /// Not a camera maker's notes, which are laid out as each maker chose.
+    func reachable() -> (directories: [Directory], whole: Bool) {
+        var found: [Directory] = []
+        var seen: Set<Int> = []
+        var whole = true
+        var waiting = [first]
+        while let at = waiting.popLast() {
+            guard seen.insert(at).inserted else { continue }
+            guard seen.count <= Self.mostDirectories, let directory = try? directory(at: at) else {
+                whole = false
+                continue
+            }
+            found.append(directory)
+            if directory.next != 0 { waiting.append(Int(directory.next)) }
+            for entry in directory.entries where Self.pointers.contains(entry.tag) {
+                guard entry.type == 4 || entry.type == 13, let raw = (try? value(of: entry)) ?? nil else {
+                    whole = false
+                    continue
+                }
+                waiting += (0..<Int(entry.count)).map { Int(u32(raw, 4 * $0)) }
+            }
+        }
+        return (found, whole)
+    }
+
+    /// The tags whose value is where another directory is: sub-directories,
+    /// the EXIF directory, the GPS block, and interoperability.
+    private static let pointers: Set<UInt16> = [0x014A, 0x8769, gpsPointer, 0xA005]
+    /// More directories than any file holds. A chain that runs past it is
+    /// not followed to its end, and is reported as not whole.
+    private static let mostDirectories = 65_536
+
     /// The bytes of a value, wherever it lies. Nil for an unknown type.
     func value(of entry: Entry) throws -> [UInt8]? {
         guard let size = entry.size else { return nil }

@@ -120,6 +120,54 @@ final class TextExifToolTests: XCTestCase {
         }
     }
 
+    /// **ExifTool reads a shorter name written where a longer one lay**,
+    /// with zeros after it and the entry still saying the longer length,
+    /// and finds no fault in it. The longer name then goes back where it
+    /// was and the file is the length it was.
+    func testExifToolReadsANameThatKeptItsRoom() throws {
+        for little in [true, false] {
+            let file = try Scratch(Fixture(little: little, text: Self.scanned, exif: Self.dated).bytes())
+            let before = try ExifTool.faults(file.url)
+            let length = try Data(contentsOf: file.url).count
+            for name in ["Nikon FE2", "EPSON Perfection V600", "M6"] {
+                try ExifText.set([.model: name], inFileAt: file.url, as: .tiff)
+                XCTAssertEqual(try ExifTool.everything(file.url)["IFD0:Model"], name, "little \(little)")
+                XCTAssertEqual(try ExifTool.faults(file.url).filter { !before.contains($0) }, [], name)
+                XCTAssertEqual(try Data(contentsOf: file.url).count, length, name)
+            }
+        }
+    }
+
+    /// **An EXIF directory left saying nothing goes as ExifTool takes one
+    /// out**: asked for the same thing on the same file, neither leaves a
+    /// pointer to one in the first directory, and ExifTool reports the same
+    /// of both files, but for where the picture's data lies. ExifTool
+    /// writes the file afresh and moves it. This does not.
+    func testAnEmptiedExifDirectoryGoesAsExifToolTakesItOut() throws {
+        func pointer(_ url: URL) throws -> TIFFStructure.Entry? {
+            try Read.firstDirectory([UInt8](try Data(contentsOf: url))).entry(0x8769)
+        }
+        for little in [true, false] {
+            let bytes = Fixture(little: little, text: Self.scanned, exif: [0x9003: "2001:01:01 01:01:01"]).bytes()
+            let ours = try Scratch(bytes)
+            let theirs = try Scratch(bytes)
+            let before = try ExifTool.everything(ours.url)
+            let faults = try ExifTool.faults(ours.url)
+            XCTAssertNotNil(try pointer(ours.url), "the fixture has a directory")
+            try ExifText.set([:], removing: [.dateTimeOriginal], inFileAt: ours.url, as: .tiff)
+            try ExifTool.run(["-q", "-overwrite_original", "-ExifIFD:DateTimeOriginal=", theirs.url.path])
+            XCTAssertNil(try pointer(ours.url), "little \(little)")
+            XCTAssertNil(try pointer(theirs.url), "ExifTool left one, little \(little)")
+            let mine = try ExifTool.everything(ours.url)
+            let its = try ExifTool.everything(theirs.url).filter { $0.key != "IFD0:StripOffsets" }
+            XCTAssertEqual(mine["IFD0:StripOffsets"], before["IFD0:StripOffsets"], "little \(little)")
+            XCTAssertEqual(ExifTool.differing(rest(mine.filter { $0.key != "IFD0:StripOffsets" }), rest(its)), [],
+                           "little \(little)")
+            XCTAssertEqual(mine["ImageDataHash"], before["ImageDataHash"], "little \(little)")
+            XCTAssertEqual(try ExifTool.faults(ours.url).filter { !faults.contains($0) }, [], "little \(little)")
+        }
+    }
+
     /// The text and the position, written one after the other in each
     /// order, and both read.
     func testTextAndAPositionTogether() throws {

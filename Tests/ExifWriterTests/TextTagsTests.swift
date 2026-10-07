@@ -133,7 +133,9 @@ final class TextTagsTests: XCTestCase {
     }
 
     /// Text short enough to sit in the entry's own four bytes sits there,
-    /// and text that was there and no longer fits goes at the end.
+    /// and text that was there and no longer fits goes at the end. Short
+    /// text set after that is written where the longer text lies, so the
+    /// room is kept (`testANameChangedBackAndForthGrowsTheFileOnce`).
     func testTextThatFitsInTheEntryIsKeptThere() throws {
         for little in bothOrders {
             let before = Fixture(little: little, text: [0x0110: "M6"]).bytes()
@@ -146,6 +148,124 @@ final class TextTagsTests: XCTestCase {
             let back = try set([.model: "M6"], in: long)
             XCTAssertEqual(try text(.model, back), "M6")
             XCTAssertEqual(back.count, long.count)
+        }
+    }
+
+    // MARK: - Room
+
+    /// **A shorter value keeps the room the longer one had**, so a name
+    /// changed back and forth costs what changing it once did: the entry
+    /// goes on saying the longer length, and the shorter text has zeros
+    /// after it.
+    ///
+    /// It used to cost the longer name's length every time that name came
+    /// back, without end, because the entry's length was shortened and
+    /// nothing then said the room behind the value was free.
+    func testANameChangedBackAndForthGrowsTheFileOnce() throws {
+        let longer = "Olympus OM-2n"
+        for little in bothOrders {
+            for blockLast in [false, true] {
+                let fixture = blockLast
+                    ? Fixture(little: little,
+                              block: .camera(latitude: 36.606111, longitude: -118.062778, altitude: 1136.5),
+                              blockLast: true)
+                    : Fixture(little: little)
+                var bytes = try set([.model: longer], in: fixture.bytes())
+                let once = bytes.count
+                // The last is short enough for the entry's own four bytes,
+                // and is still written where the longer name lies.
+                for name in [camera, longer, camera, longer, "M6", longer] {
+                    bytes = try set([.model: name], in: bytes)
+                    XCTAssertEqual(try text(.model, bytes), name)
+                    XCTAssertEqual(bytes.count, once, "\(name), little \(little), block last \(blockLast)")
+                }
+                XCTAssertEqual(try Read.firstDirectory(bytes).entry(0x0110)?.count, UInt32(longer.utf8.count + 1))
+                XCTAssertEqual(try Read.pixels(bytes), fixture.pixels)
+                guard blockLast else { continue }
+                let moved = [UInt8](try ExifGPS.settingPosition(bixby, in: Data(bytes), as: .tiff))
+                XCTAssertEqual(moved.count, once, "the block was still the last thing")
+            }
+        }
+    }
+
+    /// **Text held with more zeros after it than one is the same text**, as
+    /// a camera pads a name, and is not written again.
+    func testTextPaddedWithZerosIsTheSameText() throws {
+        for little in bothOrders {
+            var bytes = Fixture(little: little, text: [0x0110: camera + "xx"]).bytes()
+            let tiff = try TIFFStructure(ArrayStore(bytes: bytes))
+            let entry = try XCTUnwrap(try Read.firstDirectory(bytes).entry(0x0110))
+            let at = Int(tiff.u32(entry.value, 0)) + camera.utf8.count
+            bytes.replaceSubrange(at..<at + 2, with: [0, 0])
+            XCTAssertEqual(try text(.model, bytes), camera)
+            XCTAssertEqual(try set([.model: camera], in: bytes), bytes, "little \(little)")
+            let file = try Scratch(bytes, extension: "tif")
+            XCTAssertFalse(try ExifText.set([.model: camera], inFileAt: file.url, as: .tiff))
+        }
+    }
+
+    // MARK: - A value another directory shares
+
+    /// A page after the first, whose directory holds `entries`, at the end
+    /// of `bytes`, with the first directory's link pointed at it.
+    private func adding(page entries: [TIFFStructure.Entry], to bytes: [UInt8]) throws -> (bytes: [UInt8], page: Int) {
+        let tiff = try TIFFStructure(ArrayStore(bytes: bytes))
+        let root = try tiff.directory(at: tiff.first)
+        var out = bytes
+        let page = out.count
+        out += tiff.bytes(of: entries, next: 0)
+        out.replaceSubrange(root.offset + root.length - 4..<root.offset + root.length, with: tiff.bytes(UInt32(page)))
+        return (out, page)
+    }
+
+    /// **A value a later page keeps in the same bytes is not written
+    /// over**, whether the page's own directory points at it or the page's
+    /// EXIF directory does. The check used to read the first page's
+    /// directories and no others, and a shorter `Model` changed both pages.
+    func testAValueALaterPageSharesIsNotWrittenOver() throws {
+        for little in bothOrders {
+            for underExif in [false, true] {
+                var bytes = Fixture(little: little, text: [0x0110: scanner]).bytes()
+                if bytes.count % 2 == 1 { bytes.append(0) }
+                let tiff = try TIFFStructure(ArrayStore(bytes: bytes))
+                let model = try XCTUnwrap(try Read.firstDirectory(bytes).entry(0x0110))
+                var entries = [model]
+                if underExif {
+                    let at = bytes.count
+                    bytes += tiff.bytes(of: [.init(tag: 0xA434, type: 2, count: model.count, value: model.value)], next: 0)
+                    entries = [.init(tag: 0x8769, type: 4, count: 1, value: tiff.bytes(UInt32(at)))]
+                }
+                let (before, pageAt) = try adding(page: entries, to: bytes)
+
+                let after = try set([.model: camera], in: before)
+                XCTAssertEqual(try text(.model, after), camera)
+                let read = try TIFFStructure(ArrayStore(bytes: after))
+                var page = try read.directory(at: pageAt)
+                if underExif { page = try read.directory(at: Int(read.u32(page.entries[0].value, 0))) }
+                let held = try XCTUnwrap(try read.value(of: page.entries[0]))
+                XCTAssertEqual(String(decoding: held.prefix { $0 != 0 }, as: UTF8.self), scanner,
+                               "little \(little), under the page's EXIF directory \(underExif)")
+            }
+        }
+    }
+
+    /// **Where a later page cannot be read, nothing is written over**: there
+    /// may be a directory nobody found, keeping a value in any of the bytes.
+    /// The value goes at the end, and what was there is as it was.
+    func testWhereAPageCannotBeReadNothingIsWrittenOver() throws {
+        for little in bothOrders {
+            let whole = Fixture(little: little, text: [0x0110: scanner]).bytes()
+            let tiff = try TIFFStructure(ArrayStore(bytes: whole))
+            let root = try tiff.directory(at: tiff.first)
+            var before = whole
+            before.replaceSubrange(root.offset + root.length - 4..<root.offset + root.length,
+                                   with: tiff.bytes(UInt32(whole.count + 400)))
+            let after = try set([.model: camera], in: before)
+            XCTAssertEqual(try text(.model, after), camera)
+            XCTAssertEqual(after.count, before.count + camera.utf8.count + 1, "little \(little)")
+            XCTAssertEqual(changed(before, after).count <= 8, true, "only the entry's length and offset")
+            // The same file with its link whole is written in place.
+            XCTAssertEqual(try set([.model: camera], in: whole).count, whole.count)
         }
     }
 
@@ -184,6 +304,42 @@ final class TextTagsTests: XCTestCase {
             // of what used to be the directory's end.
             let room = shorter.offset + shorter.length
             XCTAssertEqual(Array(after[room..<room + 12]), [UInt8](repeating: 0, count: 12), "little \(little)")
+        }
+    }
+
+    /// **An EXIF directory left saying nothing goes**, by taking its
+    /// pointer out of the first directory, as a GPS block goes. It used to
+    /// be left as a directory of no entries, which TIFF does not allow.
+    ///
+    /// A directory this library started says its version too, and its
+    /// version alone is nothing.
+    func testAnExifDirectoryLeftSayingNothingGoes() throws {
+        let date = "2001:01:01 01:01:01"
+        for little in bothOrders {
+            let fixture = Fixture(little: little, exif: [0x9003: date])
+            let before = fixture.bytes()
+            let root = try Read.firstDirectory(before)
+            let after = try set([:], removing: [.dateTimeOriginal], in: before)
+            XCTAssertNil(try Read.firstDirectory(after).entry(0x8769), "little \(little)")
+            XCTAssertNil(try text(.dateTimeOriginal, after))
+            XCTAssertEqual(try Read.firstDirectory(after).entries.count, root.entries.count - 1)
+            XCTAssertEqual(after.count, before.count)
+            XCTAssertEqual(changed(before, after).subtracting(root.offset..<root.offset + root.length), [],
+                           "only the first directory changed")
+            XCTAssertEqual(try Read.pixels(after), fixture.pixels)
+
+            let started = try set([.dateTimeOriginal: date], in: Fixture(little: little).bytes())
+            XCTAssertEqual(try Read.exifDirectory(started)?.entries.map(\.tag), [0x9000, 0x9003])
+            let cleared = try set([:], removing: [.dateTimeOriginal], in: started)
+            XCTAssertNil(try Read.firstDirectory(cleared).entry(0x8769), "its version alone is nothing")
+
+            // One that still says something stays, and so does one nothing
+            // was taken out of.
+            let two = Fixture(little: little, exif: [0x9003: date, 0x9011: "+09:00"]).bytes()
+            let one = try set([:], removing: [.offsetTimeOriginal], in: two)
+            XCTAssertEqual(try Read.exifDirectory(one)?.entries.map(\.tag), [0x9003])
+            let versionOnly = Fixture(little: little, exif: [0x9000: "0232"]).bytes()
+            XCTAssertEqual(try set([:], removing: [.dateTimeOriginal], in: versionOnly), versionOnly)
         }
     }
 

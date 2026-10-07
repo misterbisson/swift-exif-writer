@@ -171,18 +171,36 @@ of the EXIF directory it points at: `Make`, `Model`, `Software`,
 
 **Why.** The same copy of ImageIO's that leaves a TIFF's GPS block alone
 does not write the rest of what it was handed either. Measured on macOS
-27.0.1, on a TIFF stating nothing and one stating a different value for
-each tag, with the call returning true both times:
+27.0.1, on a TIFF ImageIO wrote stating nothing and one stating a
+different value for each tag, with the call returning true both times:
 
 | Tag | File states none | File states another value |
 | --- | --- | --- |
-| `Orientation`, `DateTimeOriginal` | written | replaced |
-| `Model`, `DateTimeDigitized`, `LensModel` | written | old value kept |
-| `OffsetTimeOriginal` | not written | removed |
-| `Make`, asked to be taken out | | kept |
+| `Model`, `LensModel` | written | old value kept |
+| `DateTimeOriginal`, `OffsetTimeOriginal` | not written | removed |
+| `DateTimeDigitized` | not written | old value kept |
+| `Orientation` | | replaced |
+| `Make`, `LensMake`, asked to be taken out | | kept |
 
-So a caller that copies a TIFF through ImageIO sets these right afterwards,
-with the position.
+**Whose call this was.** The copy this repository's own test makes
+(`testWhatImageIOsCopyLeftIsSetRight`, which prints what the copy left on
+every run): each value handed in through
+`CGImageMetadataSetValueMatchingImageProperty`, a date in EXIF's form, and
+the directories read afterwards by ExifTool. Another call gave another
+answer: a digitized date handed in XMP's form replaced the one the file
+stated. Every TIFF ImageIO writes states an orientation, so there was no
+file without one to try.
+
+**Read the directories, not ImageIO.** The dates the copy keeps out of the
+EXIF it does write to the packet, as `photoshop:DateCreated` and
+`xmp:CreateDate`, and ImageIO reading the file back gives a date the EXIF
+lacks out of the packet. Through ImageIO both dates look written by a copy
+that wrote neither. This table said so itself until it was read again with
+ExifTool. `ExifText.text(of:)` reads the directory.
+
+**So a caller that copies a TIFF through ImageIO sets every tag it means
+afterwards**, and not only the ones this table calls wrong, with the
+position. A tag that already holds the value costs nothing.
 
 **The list is closed.** A caller cannot name a tag by its number. The same
 directories hold the tags that say where the picture's data is, and a
@@ -192,15 +210,27 @@ caller that could take any tag out could take those.
 
 - A value no longer than the one it replaces is written where that one
   lies. A date is always the same length, so changing one changes those
-  bytes and nothing else. Not where another tag keeps its value in the
-  same bytes, which would change both.
+  bytes and nothing else.
+- **A shorter value keeps the room the longer one had.** It is written with
+  zeros after it and its entry goes on saying the old length, as a camera
+  pads a name. The longer value fits again when it comes back, so changing
+  a name back and forth costs what changing it once did.
+- **Not where another directory keeps a value in the same bytes**, which
+  would change both. Every directory that can be found is read for that:
+  each page, and each page's EXIF directory, GPS block, interoperability
+  directory and sub-directories. Where a pointer leads somewhere no
+  directory can be read, nothing is written over and the value goes at
+  the end.
 - A longer value goes at the end, and the eight bytes of its entry that
   say how long it is and where are changed.
 - A tag the directory did not have makes it one entry longer, so the
   directory is written again at the end and the four bytes that point at
   it are changed. A file with no EXIF directory gets one, which says its
   version and nothing else.
-- A tag taken out makes the directory shorter where it stands.
+- A tag taken out makes the directory shorter where it stands. **An EXIF
+  directory left saying nothing goes**, by taking its pointer out of the
+  first directory, as ExifTool takes one out. Its version alone is
+  nothing.
 - **A GPS block that was the last thing in the file still is.** It is
   moved along and what is new is written before it, so the next position
   still does not grow the file.
@@ -221,6 +251,23 @@ read.
   starts one with `FlashpixVersion` and a `ColorSpace` of uncalibrated,
   and its validation asks for both. The second is a statement about the
   picture's colour that nobody made.
+- **Adding a tag, taking it out and adding it again grows the file every
+  time round**, without end. A directory that lost a tag is shorter where
+  it stands, and the next tag it gains sends a fresh copy of it to the end
+  all the same: nothing in the file says the room after it is free.
+  Measured on a built file, `OffsetTimeOriginal` and `LensModel` added to
+  an EXIF directory of one tag, taken out and added again: 68 bytes a
+  round, the directory and the two values. A caller that copies through
+  ImageIO on every save meets this, because the copy takes
+  `DateTimeOriginal` and `OffsetTimeOriginal` out each time. A value does keep its room, and a
+  date and a position do not grow the file.
+- **A value a camera maker's notes keep in the same bytes as a text tag
+  would be written over.** The notes are laid out as each maker chose and
+  are not read. No file has been seen to do this.
+- **A text write cut short can cost the position.** Where a GPS block is
+  the last thing in the file and something new goes at the end, the block
+  is cut off first and written again after it. Write into a copy and move
+  it into place where that matters.
 
 - **A packet that cannot be read is a reason to refuse the file**, because
   what it states is then not known, and writing the EXIF alone could leave
@@ -294,8 +341,12 @@ ExifTool is missing.
   the picture as they were; and against ImageIO, on TIFFs it wrote, of 8
   and 16 bits, compressed, and of two pages. One test is the use this was
   written for: ImageIO's copy is handed a camera, a lens and a time, the
-  text and the position are set in the file it wrote, and ImageIO reads
-  every one, the same picture, and the packet the copy wrote.
+  text and the position are set in the file it wrote, and the directories
+  hold every one, ImageIO reads every one, the same picture, and the
+  packet the copy wrote. ExifTool reads the same file, because ImageIO's
+  reading cannot vouch for a date. A file with a second page that keeps a
+  value in the first page's bytes is built by hand: ImageIO keeps each
+  page's text apart.
 
 ### On your own photographs
 
@@ -314,6 +365,12 @@ The text tags have a test of the same kind, for the TIFFs in the folder:
 ```sh
 EXIF_WRITER_REAL_FILES=/path/to/a/folder swift test --filter RealFileTests/testTextOnTIFFsOfYourOwn
 ```
+
+What the author's own scans did not cover: all 230 TIFFs already had an
+EXIF directory, none had a GPS block as its last thing, and none had a
+second page. So a file with no EXIF directory getting one, and the block
+staying last, have met built files and files ImageIO wrote, and no real
+scan.
 
 To learn only which files would be refused, and why, there is a quicker
 one that writes nothing and needs no ExifTool:

@@ -11,6 +11,11 @@ let package = Package(
     ],
     targets: [
         .target(name: "ExifWriter"),
-        .testTarget(name: "ExifWriterTests", dependencies: ["ExifWriter"]),
+        .testTarget(name: "ExifWriterTests", dependencies: ["ExifWriter"],
+                    // Two small HEICs ImageIO wrote, of a drawn picture and not
+                    // a photograph. A HEIC cannot be built by hand the way the
+                    // TIFF and PNG fixtures are, and a CI runner cannot be
+                    // counted on to encode one.
+                    resources: [.copy("Fixtures")]),
     ]
 )

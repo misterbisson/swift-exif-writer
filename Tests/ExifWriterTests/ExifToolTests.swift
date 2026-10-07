@@ -40,13 +40,14 @@ final class ExifToolTests: XCTestCase {
             let fresh = before["File:ExifByteOrder"] == nil
             try ExifGPS.setPosition(bixby, inFileAt: file.url, as: sample.container)
             let placed = try ExifTool.everything(file.url)
-            XCTAssertEqual(ExifTool.withoutPosition(placed, fresh: fresh),
-                           ExifTool.withoutPosition(before, fresh: fresh), sample.name)
+            XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(placed, fresh: fresh),
+                                              ExifTool.withoutPosition(before, fresh: fresh)), [], sample.name)
             XCTAssertNotNil(placed["ImageDataHash"], "the digest of the picture was compared")
 
             try ExifGPS.setPosition(nil, inFileAt: file.url, as: sample.container)
             let cleared = try ExifTool.everything(file.url)
-            XCTAssertEqual(ExifTool.withoutPosition(cleared), ExifTool.withoutPosition(before), sample.name)
+            XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(cleared),
+                                              ExifTool.withoutPosition(before)), [], sample.name)
             XCTAssertNil(try ExifTool.position(file.url), sample.name)
         }
     }
@@ -100,8 +101,8 @@ final class ExifToolTests: XCTestCase {
             let fresh = try ExifTool.everything(ours.url)["File:ExifByteOrder"] == nil
             try ExifGPS.setPosition(bixby, inFileAt: ours.url, as: sample.container)
             try ExifTool.setPosition(bixby, theirs.url)
-            XCTAssertEqual(ExifTool.comparable(try ExifTool.everything(ours.url), fresh: fresh),
-                           ExifTool.comparable(try ExifTool.everything(theirs.url), fresh: fresh), sample.name)
+            XCTAssertEqual(ExifTool.differing(ExifTool.comparable(try ExifTool.everything(ours.url), fresh: fresh),
+                                              ExifTool.comparable(try ExifTool.everything(theirs.url), fresh: fresh)), [], sample.name)
         }
     }
 
@@ -115,8 +116,8 @@ final class ExifToolTests: XCTestCase {
             try ExifGPS.setPosition(bixby, inFileAt: file.url, as: sample.container)
             let read = try ExifTool.position(file.url)
             XCTAssertEqual(read?.latitude ?? .nan, bixby.latitude, accuracy: 1e-7, sample.name)
-            XCTAssertEqual(ExifTool.withoutPosition(try ExifTool.everything(file.url)),
-                           ExifTool.withoutPosition(before), sample.name)
+            XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(try ExifTool.everything(file.url)),
+                                              ExifTool.withoutPosition(before)), [], sample.name)
             try ExifGPS.setPosition(nil, inFileAt: file.url, as: sample.container)
             XCTAssertNil(try ExifTool.position(file.url), sample.name)
         }
@@ -130,7 +131,14 @@ struct Sample {
     let bytes: [UInt8]
 
     func scratch() throws -> Scratch {
-        try Scratch(bytes, extension: container == .tiff ? "tif" : "png")
+        try Scratch(bytes, extension: container.fileExtension)
+    }
+
+    /// One of the HEICs ImageIO wrote, which are files beside the tests.
+    static func drawn(_ name: String) -> [UInt8] {
+        guard let url = Bundle.module.url(forResource: name, withExtension: "heic", subdirectory: "Fixtures"),
+              let data = try? Data(contentsOf: url) else { return [] }
+        return [UInt8](data)
     }
 
     private static let camera = Fixture.Block.camera(latitude: 36.606111, longitude: -118.062778,
@@ -154,7 +162,20 @@ struct Sample {
         Sample(name: "PNG, EXIF after the picture", container: .png,
                bytes: PNGFixture(exif: .holding(Fixture(block: .altitudeOnly(250)).bytes()),
                                  exifLast: true).bytes()),
+        Sample(name: "HEIC ImageIO wrote", container: .heic, bytes: drawn("drawn")),
+        Sample(name: "HEIC ImageIO wrote with a camera's position", container: .heic,
+               bytes: drawn("drawn-camera")),
     ]
+}
+
+extension ImageContainer {
+    var fileExtension: String {
+        switch self {
+        case .tiff: "tif"
+        case .png: "png"
+        case .heic: "heic"
+        }
+    }
 }
 
 /// A file in the temporary directory that goes when the test does.
@@ -250,13 +271,21 @@ enum ExifTool {
         "IFD0:XResolution", "IFD0:YResolution", "IFD0:ResolutionUnit",
     ]
 
+    /// **The data box of a HEIC, as ExifTool reports it.** The EXIF lies in
+    /// that box beside the picture, so the box is as much longer as the
+    /// EXIF is, under either writer. The picture's own bytes are held to
+    /// account by the digest, and by ImageIO decoding them.
+    private static let dataBox: Set<String> = [
+        "QuickTime:MediaData", "QuickTime:MediaDataSize", "QuickTime:MediaDataOffset",
+    ]
+
     /// Everything but the position, the version a new block states, and the
     /// pointer to the block, which is the position's own plumbing. `fresh`
     /// where the file had no EXIF before.
     static func withoutPosition(_ tags: [String: String], fresh: Bool = false) -> [String: String] {
         ofTheFile(tags).filter {
             !position.contains($0.key) && $0.key != "GPS:GPSVersionID" && !$0.key.hasSuffix(":GPSInfo")
-                && !(fresh && startingExif.contains($0.key))
+                && !dataBox.contains($0.key) && !(fresh && startingExif.contains($0.key))
         }
     }
 
@@ -270,6 +299,13 @@ enum ExifTool {
         }
         out["GPS:GPSVersionID"] = tags["GPS:GPSVersionID"]
         return out
+    }
+
+    /// The tags two reports disagree about, each with both its values, so a
+    /// failure names what changed and not two whole files.
+    static func differing(_ a: [String: String], _ b: [String: String]) -> [String] {
+        Set(a.keys).union(b.keys).sorted().filter { a[$0] != b[$0] }
+            .map { "\($0): \(a[$0] ?? "absent") | \(b[$0] ?? "absent")" }
     }
 
     static func position(_ url: URL) throws -> GPSPosition? {

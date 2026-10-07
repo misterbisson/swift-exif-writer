@@ -62,20 +62,20 @@ final class RealFileTests: XCTestCase {
                 continue
             }
             assertSame(try ExifTool.position(copy), first, "set, \(name)")
-            XCTAssertEqual(ExifTool.withoutPosition(try ExifTool.everything(copy)),
-                           ExifTool.withoutPosition(before), "set, \(name)")
+            XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(try ExifTool.everything(copy)),
+                                              ExifTool.withoutPosition(before)), [], "set, \(name)")
             let placed = try self.size(copy)
 
             try ExifGPS.setPosition(second, inFileAt: copy, as: container)
             assertSame(try ExifTool.position(copy), second, "moved, \(name)")
-            XCTAssertEqual(ExifTool.withoutPosition(try ExifTool.everything(copy)),
-                           ExifTool.withoutPosition(before), "moved, \(name)")
+            XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(try ExifTool.everything(copy)),
+                                              ExifTool.withoutPosition(before)), [], "moved, \(name)")
             XCTAssertEqual(try self.size(copy), placed, "moving it again grew the file: \(name)")
 
             try ExifGPS.setPosition(nil, inFileAt: copy, as: container)
             XCTAssertNil(try ExifTool.position(copy), "taken out, \(name)")
-            XCTAssertEqual(ExifTool.withoutPosition(try ExifTool.everything(copy)),
-                           ExifTool.withoutPosition(before), "taken out, \(name)")
+            XCTAssertEqual(ExifTool.differing(ExifTool.withoutPosition(try ExifTool.everything(copy)),
+                                              ExifTool.withoutPosition(before)), [], "taken out, \(name)")
 
             summary[had == nil ? "had no position" : "had a position", default: 0] += 1
             summary["bytes added by the first write, most"] =

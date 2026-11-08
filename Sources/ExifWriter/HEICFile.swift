@@ -17,6 +17,12 @@ import Foundation
 /// every offset in `iloc` that pointed past it is moved by the difference.
 /// Every other item's bytes are carried across as they were.
 ///
+/// **Which packet, and which EXIF, is the picture's own**: the item that
+/// describes the primary picture (`pitm`) by a `cdsc` reference. A phone's
+/// HEIC can hold more than one packet. An iPhone's holds one for its HDR gain
+/// map as well, often listed first, and ImageIO reads the primary's. An item
+/// that describes no picture in particular is taken where it is the only one.
+///
 /// An AVIF is laid out the same way.
 enum HEICFile {
 
@@ -179,6 +185,11 @@ enum HEICFile {
         let iloc: Box
         var locations: Locations
         let listed: [Listed]
+        /// The primary picture's item, where `pitm` names one.
+        var primary: Int?
+        /// Each item a `cdsc` reference starts from, and the items it says
+        /// it describes.
+        var describes: [Int: [Int]] = [:]
     }
 
     /// One item as `iinf` lists it.
@@ -213,8 +224,42 @@ enum HEICFile {
               let iloc = children.first(where: { $0.type == "iloc" }) else {
             throw ExifWriterError.malformed("a HEIC with no list of its items")
         }
-        return Layout(top: top, iloc: iloc, locations: try Locations(Array(bytes[iloc.body])),
-                      listed: try listed(bytes, iinf))
+        var layout = Layout(top: top, iloc: iloc, locations: try Locations(Array(bytes[iloc.body])),
+                            listed: try listed(bytes, iinf))
+        if let pitm = children.first(where: { $0.type == "pitm" }), pitm.body.count >= 6 {
+            let wide = bytes[pitm.body.lowerBound] != 0
+            guard pitm.body.count >= (wide ? 8 : 6) else { throw ExifWriterError.malformed("a primary item box cut short") }
+            layout.primary = big(bytes, pitm.body.lowerBound + 4, wide ? 4 : 2)
+        }
+        if let iref = children.first(where: { $0.type == "iref" }), iref.body.count >= 4 {
+            let width = bytes[iref.body.lowerBound] == 0 ? 2 : 4
+            for reference in try boxes(bytes, in: iref.body.lowerBound + 4..<iref.end) where reference.type == "cdsc" {
+                var at = reference.body.lowerBound
+                guard at + width + 2 <= reference.end else { throw ExifWriterError.malformed("a reference cut short") }
+                let from = big(bytes, at, width)
+                let count = big(bytes, at + width, 2)
+                at += width + 2
+                guard at + count * width <= reference.end else { throw ExifWriterError.malformed("a reference cut short") }
+                layout.describes[from, default: []] += (0..<count).map { big(bytes, at + $0 * width, width) }
+            }
+        }
+        return layout
+    }
+
+    /// **The picture's own item of a kind**: the one that describes the
+    /// primary picture, or else the one that describes no picture in
+    /// particular. Nil where every item of the kind describes another
+    /// picture, as a gain map's packet does, or there is none.
+    private static func chosen(_ kind: (Listed) -> Bool, _ what: String, in layout: Layout) throws -> Listed? {
+        let all = layout.listed.filter(kind)
+        if let primary = layout.primary {
+            let own = all.filter { layout.describes[$0.id]?.contains(primary) == true }
+            guard own.count <= 1 else { throw ExifWriterError.unsupported("a HEIC that holds two \(what) for its picture") }
+            if let own = own.first { return own }
+        }
+        let general = all.filter { layout.describes[$0.id] == nil }
+        guard general.count <= 1 else { throw ExifWriterError.unsupported("a HEIC that holds two \(what) for no picture in particular") }
+        return general.first
     }
 
     private static func listed(_ bytes: [UInt8], _ iinf: Box) throws -> [Listed] {
@@ -270,10 +315,10 @@ enum HEICFile {
         return Found(layout: layout, item: item, payload: payload)
     }
 
-    /// The EXIF item, or nil where the file has none.
-    private static func exif(_ bytes: [UInt8]) throws -> Found? {
+    /// The picture's EXIF item, or nil where the file has none.
+    private static func exifItem(_ bytes: [UInt8]) throws -> Found? {
         let layout = try layout(bytes)
-        guard let listed = layout.listed.first(where: { $0.type == "Exif" }) else { return nil }
+        guard let listed = try chosen({ $0.type == "Exif" }, "EXIF items", in: layout) else { return nil }
         return try find(listed.id, "EXIF", in: layout, bytes)
     }
 
@@ -287,12 +332,13 @@ enum HEICFile {
         return start + 4 + big(bytes, start, 4)..<found.payload.upperBound
     }
 
-    /// The item that holds the XMP packet, or nil where the file has none:
-    /// a `mime` item that says it holds RDF. The item's bytes are the
-    /// packet and nothing else.
-    private static func packet(_ bytes: [UInt8]) throws -> Found? {
+    /// The item that holds the picture's XMP packet, or nil where the file
+    /// has none: a `mime` item that says it holds RDF. The item's bytes are
+    /// the packet and nothing else.
+    private static func packetItem(_ bytes: [UInt8]) throws -> Found? {
         let layout = try layout(bytes)
-        guard let listed = layout.listed.first(where: { $0.type == "mime" && $0.content == "application/rdf+xml" })
+        guard let listed = try chosen({ $0.type == "mime" && $0.content == "application/rdf+xml" },
+                                      "XMP packets", in: layout)
         else { return nil }
         // One that is compressed cannot be read here, so what it states
         // cannot be known.
@@ -314,13 +360,45 @@ enum HEICFile {
     }
 
     private static func exifPosition(in bytes: [UInt8]) throws -> GPSPosition? {
-        guard let found = try exif(bytes) else { return nil }
+        guard let found = try exifItem(bytes) else { return nil }
         return try GPSBlock.position(in: ArrayStore(bytes: Array(bytes[try structure(found, bytes)])))
     }
 
     private static func packetPosition(in bytes: [UInt8]) throws -> GPSPosition? {
-        guard let found = try packet(bytes) else { return nil }
+        guard let found = try packetItem(bytes) else { return nil }
         return try XMPPacket.position(in: Array(bytes[found.payload]))
+    }
+
+    // MARK: An item, read and replaced whole
+
+    /// **The picture's XMP packet**, or nil where the file has none.
+    static func packet(in bytes: [UInt8]) throws -> [UInt8]? {
+        try packetItem(bytes).map { Array(bytes[$0.payload]) }
+    }
+
+    /// **The TIFF structure in the picture's EXIF item**, or nil where the
+    /// file has none.
+    static func exifStructure(in bytes: [UInt8]) throws -> [UInt8]? {
+        guard let found = try exifItem(bytes) else { return nil }
+        return Array(bytes[try structure(found, bytes)])
+    }
+
+    /// **The same HEIC with the picture's packet replaced by `packet`**, which
+    /// may be longer or shorter, as `replacing` does it: nothing moves where
+    /// it is the same length, or where the packet is the last thing in the
+    /// file.
+    static func replacingPacket(with packet: [UInt8], in bytes: [UInt8]) throws -> [UInt8] {
+        guard let found = try packetItem(bytes) else { throw ExifWriterError.unsupported("a HEIC with no XMP packet") }
+        return try replacing(found, "XMP", with: packet, in: bytes)
+    }
+
+    /// **The same HEIC with the TIFF structure in the picture's EXIF item
+    /// replaced by `structure`**, its prefix kept.
+    static func replacingExif(with structure: [UInt8], in bytes: [UInt8]) throws -> [UInt8] {
+        guard let found = try exifItem(bytes) else { throw ExifWriterError.unsupported("a HEIC with no EXIF") }
+        let tiff = try self.structure(found, bytes)
+        return try replacing(found, "EXIF", with: Array(bytes[found.payload.lowerBound..<tiff.lowerBound]) + structure,
+                             in: bytes)
     }
 
     /// The same HEIC with the position set, or with nil taken out, in its
@@ -334,14 +412,14 @@ enum HEICFile {
     /// The same HEIC with its packet's position changed. Nil where there is
     /// no packet, or it states no position, or it already states this one.
     private static func settingPacket(_ position: GPSPosition?, in bytes: [UInt8]) throws -> [UInt8]? {
-        guard let found = try packet(bytes) else { return nil }
+        guard let found = try packetItem(bytes) else { return nil }
         let old = Array(bytes[found.payload])
         guard let new = try XMPPacket.setting(position, in: old), new != old else { return nil }
         return try replacing(found, "XMP", with: new, in: bytes)
     }
 
     private static func settingExif(_ position: GPSPosition?, in bytes: [UInt8]) throws -> [UInt8]? {
-        guard let found = try exif(bytes) else {
+        guard let found = try exifItem(bytes) else {
             guard position != nil else { return nil }
             throw ExifWriterError.unsupported("a HEIC with no EXIF")
         }

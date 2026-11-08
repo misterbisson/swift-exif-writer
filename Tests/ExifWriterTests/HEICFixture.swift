@@ -29,6 +29,15 @@ struct HEICFixture {
     var noExif = false
     /// The XMP packet, which is the third item and lies last.
     var packet: [UInt8] = HEICFixture.notes
+    /// Add a second packet, item 4, for a gain map picture, item 5, as an
+    /// iPhone does: listed before the picture's own and lying first.
+    var gainMap = false
+    /// Say the picture's packet describes the picture (`cdsc`). Without it,
+    /// it describes no picture in particular.
+    var packetDescribes = true
+
+    static let gainMapPicture: [UInt8] = (0..<40).map { UInt8(truncatingIfNeeded: $0 &* 7 &+ 3) }
+    static let gainMapNotes: [UInt8] = [UInt8]("<x:xmpmeta>the gain map's own, with HDRGainMapVersion</x:xmpmeta>".utf8)
 
     static let picture: [UInt8] = (0..<180).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ 1) }
     static let notes: [UInt8] = [UInt8]("<x:xmpmeta>a packet that must come through as it was</x:xmpmeta>".utf8)
@@ -50,6 +59,7 @@ struct HEICFixture {
         // The items in the order they lie in the data box.
         var lying: [(id: Int, bytes: [UInt8])] = [(1, Self.picture), (3, packet)]
         if !noExif { lying.insert((2, payload), at: exifLast ? 2 : 0) }
+        if gainMap { lying = [(4, Self.gainMapNotes), (5, Self.gainMapPicture)] + lying }
 
         func meta(_ dataStart: Int) -> [UInt8] {
             var offsets: [Int: (Int, Int)] = [:]
@@ -78,16 +88,18 @@ struct HEICFixture {
             }
             var infe = entry(1, "hvc1") + entry(3, "mime")
             if !noExif { infe += entry(2, "Exif") }
+            if gainMap { infe = entry(4, "mime") + entry(5, "hvc1") + infe }
             let full: [UInt8] = [0, 0, 0, 0]
             var listed = full
-            listed += number(noExif ? 2 : 3, 2)
+            listed += number((noExif ? 2 : 3) + (gainMap ? 2 : 0), 2)
             listed += infe
             var handler: [UInt8] = full + full
             handler += [UInt8]("pict".utf8)
             handler += [UInt8](repeating: 0, count: 13)
             var references = full
             references += box("cdsc", [0, 2, 0, 1, 0, 1])
-            references += box("cdsc", [0, 3, 0, 1, 0, 1])
+            if packetDescribes { references += box("cdsc", [0, 3, 0, 1, 0, 1]) }
+            if gainMap { references += box("cdsc", [0, 4, 0, 1, 0, 5]) }
             var body = full
             body += box("hdlr", handler)
             body += box("pitm", [0, 0, 0, 0, 0, 1])

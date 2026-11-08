@@ -142,6 +142,11 @@ cut out.
 - **In a PNG** the packet is the text of an `iTXt` chunk, which is rebuilt
   with its new length and checksum where it was.
 - **In a HEIC** the packet is an item, replaced the way the EXIF item is.
+  It is the picture's own: the item that describes the primary picture.
+  An iPhone's HEIC holds a second packet for its HDR gain map, often listed
+  first, and ImageIO reads the primary's. One that describes no picture in
+  particular is taken where it is the only one, and two for the picture are
+  refused.
 - **In a TIFF** the packet is changed where it lies when it fits: a packet
   ends in white space for the purpose, and a shorter position leaves more
   of it. Where it does not fit, the packet is written again at the end of
@@ -328,9 +333,12 @@ read.
   the box that holds the offsets, offsets from a base, eight-byte offsets,
   a 64-bit data box.
 
-**No HEIC straight from a phone has been tried yet.** The HEICs here were
-written by ImageIO: two small ones kept beside the tests, and a 24 megapixel
-one converted from a camera's JPEG.
+The HEICs kept here were written by ImageIO: two small ones beside the
+tests, and a 24 megapixel one converted from a camera's JPEG. **Sixteen
+iPhone HEICs** (iPhone XS to iPhone 17 Pro Max, iOS 13 to 26, each later
+written into by Lightroom Classic, and most holding a gain map's packet
+beside the picture's) have been through the test on your own photographs
+below, on copies.
 
 CI runs all of it on macOS and the first two on Linux, and fails if
 ExifTool is missing.

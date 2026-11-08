@@ -408,6 +408,99 @@ final class XMPInFilesTests: XCTestCase {
         }
     }
 
+    /// **A phone's HEIC with a gain map holds two packets**, the gain map's
+    /// listed first. The picture's own is the one changed, in every layout,
+    /// and the gain map's is the bytes it was.
+    func testAGainMapsPacketIsNotThePictures() throws {
+        for (name, layout) in layouts {
+            let packet = XMPFixture(style: .lightroom)
+            var fixture = layout
+            fixture.exif = Fixture(block: camera).bytes()
+            fixture.packet = packet.bytes()
+            fixture.gainMap = true
+            let before = fixture.bytes()
+            XCTAssertEqual(try HEICFile.packet(in: before), packet.bytes(), name)
+            assertSame(try ExifGPS.positions(in: Data(before), as: .heic).xmp, whitney, name)
+
+            let bytes = try set(sydney, before, .heic)
+            let items = try Read.items(bytes)
+            XCTAssertEqual(said(items[3]), packet.stating(sydney).text(), name)
+            XCTAssertEqual(items[4], HEICFixture.gainMapNotes, name)
+            XCTAssertEqual(items[5], HEICFixture.gainMapPicture, name)
+            XCTAssertEqual(items[1], HEICFixture.picture, name)
+            XCTAssertEqual(try Read.boxes(bytes).map(\.size).reduce(0, +), bytes.count, name)
+        }
+    }
+
+    /// **A packet that describes no picture in particular is the picture's**
+    /// where it is the only one, as a writer that adds no reference leaves
+    /// it. Beside a gain map's, it still is.
+    func testAPacketWithNoReferenceIsThePictures() throws {
+        for gainMap in [false, true] {
+            let before = HEICFixture(packet: HEICFixture.notes, gainMap: gainMap, packetDescribes: false).bytes()
+            XCTAssertEqual(try HEICFile.packet(in: before), HEICFixture.notes, "gain map \(gainMap)")
+        }
+    }
+
+    /// **A packet replaced whole**: longer or shorter, every other item is
+    /// the bytes it was, and the boxes add up. Last in the file, nothing
+    /// before it moves.
+    func testAPacketIsReplacedWhole() throws {
+        for (name, layout) in layouts {
+            var fixture = layout
+            fixture.gainMap = true
+            let before = fixture.bytes()
+            for new in [HEICFixture.notes + [UInt8](repeating: 0x20, count: 3000), Array(HEICFixture.notes.prefix(20))] {
+                let bytes = try HEICFile.replacingPacket(with: new, in: before)
+                let items = try Read.items(bytes)
+                XCTAssertEqual(items[3], new, name)
+                XCTAssertEqual(try HEICFile.packet(in: bytes), new, name)
+                XCTAssertEqual(items[1], HEICFixture.picture, name)
+                XCTAssertEqual(items[2], fixture.payload, name)
+                XCTAssertEqual(items[4], HEICFixture.gainMapNotes, name)
+                XCTAssertEqual(items[5], HEICFixture.gainMapPicture, name)
+                XCTAssertEqual(try Read.boxes(bytes).map(\.size).reduce(0, +), bytes.count, name)
+                if !fixture.metaLast, !fixture.exifLast {
+                    let at = before.count - HEICFixture.notes.count
+                    XCTAssertEqual(Array(bytes[..<at]).count, at)
+                    XCTAssertEqual(Array(bytes[(at - HEICFixture.picture.count)..<at]), HEICFixture.picture,
+                                   "the picture is where it was, \(name)")
+                }
+            }
+        }
+    }
+
+    /// **The EXIF item's structure replaced whole**, its prefix kept.
+    func testAnEXIFStructureIsReplacedWhole() throws {
+        for (name, layout) in layouts {
+            var fixture = layout
+            fixture.gainMap = true
+            let before = fixture.bytes()
+            XCTAssertEqual(try HEICFile.exifStructure(in: before), fixture.exif, name)
+            let new = Fixture(block: camera).bytes()
+            let bytes = try HEICFile.replacingExif(with: new, in: before)
+            XCTAssertEqual(try HEICFile.exifStructure(in: bytes), new, name)
+            let items = try Read.items(bytes)
+            XCTAssertEqual(Array(try XCTUnwrap(items[2]).prefix(10)), Array(fixture.payload.prefix(10)), name)
+            XCTAssertEqual(items[3], HEICFixture.notes, name)
+            XCTAssertEqual(items[1], HEICFixture.picture, name)
+        }
+    }
+
+    /// **Two packets for one picture are refused**, since which one a
+    /// reader takes can't be known.
+    func testTwoPacketsForThePictureAreRefused() throws {
+        var bytes = HEICFixture(packet: HEICFixture.notes, gainMap: true).bytes()
+        // Point the gain map's reference at the picture instead: item 5
+        // becomes item 1, the last byte of its cdsc box.
+        let marker: [UInt8] = [0x63, 0x64, 0x73, 0x63, 0, 4, 0, 1, 0, 5]
+        let at = try XCTUnwrap((0...(bytes.count - marker.count)).first { Array(bytes[$0..<$0 + marker.count]) == marker })
+        bytes[at + marker.count - 1] = 1
+        XCTAssertThrowsError(try HEICFile.packet(in: bytes)) {
+            XCTAssertEqual($0 as? ExifWriterError, .unsupported("a HEIC that holds two XMP packets for its picture"))
+        }
+    }
+
     /// A HEIC with no EXIF is still refused, whatever its packet states,
     /// and nothing of it is changed. Its packet's position can be read, and
     /// taken out.
